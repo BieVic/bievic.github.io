@@ -1,0 +1,284 @@
+---
+title: "From prompt to token: LLM inference on a GPU, and on a thermodynamic chip"
+date: 2026-10-10
+description: "What actually happens between hitting enter and seeing the first word of an LLM's answer, and how the same request could be served by a thermodynamic sampling unit, once its open problems are solved."
+categories: [hardware, ai, thermodynamic-computing, llm-inference]
+bibliography:
+  - llm-inference-thermodynamic.bib
+  - thermodynamic-processors.bib
+echo: false
+---
+
+In my [primer on thermodynamic processors](2026-10-09-thermodynamic-processors-primer.qmd) I argued that generative AI is, at its core, a sampling problem, and that hardware which samples natively could do that job far more efficiently than a GPU. That is a nice slogan. In this post I want to make it concrete by following a single request, *"What is the capital of France?"*, through today's hardware and then through a hypothetical thermodynamic one.
+
+For the second half I'll be generous: assume the hard problems from the primer (scaling to millions of cells, precise couplings, fast I/O, models that match transformer quality) have been solved. The question is not *whether* that happens, but what an LLM server would look like *if* it does.
+
+## Part 1: Serving an LLM today
+
+### The life of a request
+
+A modern LLM server is a CPU and one or more GPUs working as a team. The CPU does the bookkeeping, the GPU does the maths.
+
+```{mermaid}
+%%| fig-cap: "One request through a typical CPU + GPU serving stack."
+sequenceDiagram
+    participant U as Client
+    participant C as CPU (API server)
+    participant G as GPU
+    U->>C: prompt (text)
+    C->>C: tokenize, schedule into a batch
+    C->>G: token IDs
+    G->>G: prefill: all prompt tokens in parallel, fill KV cache
+    loop until end-of-sequence or max tokens
+        G->>G: decode: one forward pass → logits
+        G->>G: sample the next token
+        G-->>C: token ID
+        C-->>U: detokenized text (streamed)
+    end
+```
+
+1. **Tokenization (CPU).** The text is split into tokens, integer IDs from a vocabulary of typically 30k–250k entries. *"What is the capital of France?"* becomes about eight of them.
+2. **Scheduling (CPU).** The server does not run one request at a time. A scheduler continuously merges requests into batches and manages GPU memory for them. Serving engines like vLLM page the per-request state much like an operating system pages virtual memory [@kwon2023vllm].
+3. **Prefill (GPU).** All prompt tokens go through the network at once. Every layer produces a *key* and a *value* vector per token, which are stored in the **KV cache** so they never have to be recomputed. Prefill determines the *time to first token*.
+4. **Decode (GPU).** Now the model generates, one token per forward pass. Each pass looks at the KV cache, appends one entry and produces a vector of **logits**, one score per vocabulary entry.
+5. **Sampling (GPU).** The logits are turned into a probability distribution, and one token is drawn from it. That token is fed back in as the input of the next decode step.
+6. **Detokenization and streaming (CPU).** Token IDs are turned back into text and streamed to the client.
+
+Steps 3 and 4 run the same network, but they stress the hardware in completely different ways. To see why, we need a bit of maths.
+
+### Prefill is compute-bound, decode is memory-bound
+
+A transformer with $N$ parameters needs roughly $2N$ floating-point operations per token: one multiply and one add per weight. For a prompt of $L$ tokens, prefill therefore costs
+
+$$
+\text{FLOPs}_\text{prefill} \approx 2NL,
+$$
+
+and the weights only have to be read from memory *once* for all $L$ tokens.
+
+Decode is different. Every step produces a single token per sequence, but it still has to stream **all** weights from GPU memory (HBM) into the compute units. With a batch of $B$ sequences and 16-bit weights (2 bytes each), one decode step does about $2NB$ FLOPs while moving $2N$ bytes. The ratio of the two is the **arithmetic intensity** $I$:
+
+$$
+I_\text{decode} \approx \frac{2NB}{2N} = B \ \frac{\text{FLOP}}{\text{byte}}, \qquad I_\text{prefill} \approx L \ \frac{\text{FLOP}}{\text{byte}}.
+$$
+
+The *roofline model* [@williams2009roofline] tells us what a chip can deliver at a given intensity: either it is limited by memory bandwidth $\beta$ or by peak compute $\pi$,
+
+$$
+P(I) = \min(\pi,\ \beta \cdot I).
+$$
+
+An Nvidia H100 SXM has $\pi \approx 989$ TFLOP/s (dense BF16) and $\beta \approx 3.35$ TB/s. The *ridge point*, where the two limits meet, is at $\pi / \beta \approx 295$ FLOP/byte. Anything below that leaves compute units idle while they wait for data.
+
+```{ojs}
+//| label: fig-roofline
+//| fig-cap: "Roofline of an H100 (log-log). Decode at small batch sizes sits far left on the memory-bound slope; prefill of a long prompt reaches the compute roof."
+{
+  const peak = 989, bw = 3.35;
+  const xs = d3.range(-0.5, 4.01, 0.02).map(e => 10 ** e);
+  const roof = xs.map(I => ({I, perf: Math.min(peak, bw * I)}));
+  const points = [
+    {name: "decode, batch 1", I: 1},
+    {name: "decode, batch 64", I: 64},
+    {name: "prefill, 2k-token prompt", I: 2000},
+  ].map(p => ({...p, perf: Math.min(peak, bw * p.I)}));
+  return Plot.plot({
+    width: 640,
+    marginRight: 40,
+    x: {type: "log", label: "Arithmetic intensity (FLOP/byte) →", grid: true},
+    y: {type: "log", label: "↑ Attainable TFLOP/s", domain: [1, 2000], grid: true},
+    marks: [
+      Plot.line(roof, {x: "I", y: "perf", strokeWidth: 2.5, stroke: "#00bc8c"}),
+      Plot.ruleX([peak / bw], {strokeDasharray: "4,4", strokeOpacity: 0.6}),
+      Plot.text([{I: peak / bw, perf: 1.4}], {x: "I", y: "perf", text: () => "ridge ≈ 295", dx: 6, textAnchor: "start"}),
+      Plot.dot(points, {x: "I", y: "perf", r: 5, fill: "currentColor"}),
+      Plot.text(points, {x: "I", y: "perf", text: "name", dy: 14, textAnchor: "end"}),
+    ]
+  });
+}
+```
+
+A back-of-the-envelope example with an 8B-parameter model in BF16, i.e. ~16 GB of weights:
+
+- **Prefill** of a 2,000-token prompt: $2 \cdot 8 \cdot 10^9 \cdot 2000 \approx 3.2 \cdot 10^{13}$ FLOPs, about **32 ms** at peak compute.
+- **Decode** at batch size 1: every token requires reading 16 GB, so the GPU can produce at most $3.35\,\text{TB/s} \,/\, 16\,\text{GB} \approx$ **210 tokens/s**, using well under 1% of its compute.
+
+This is why serving is all about batching: a larger $B$ moves decode to the right on the roofline and amortises each weight read over more users [@pope2022scaling]. It is also why tricks like speculative decoding exist, which guess several tokens cheaply and verify them in one pass [@leviathan2023speculative].
+
+The KV cache makes things worse as contexts grow. Per token it stores
+
+$$
+\text{KV bytes per token} = 2 \cdot n_\text{layers} \cdot n_\text{kv heads} \cdot d_\text{head} \cdot \text{bytes per value}.
+$$
+
+For a Llama-3-8B-style model ($32$ layers, $8$ KV heads, $d_\text{head} = 128$, BF16) that is $2 \cdot 32 \cdot 8 \cdot 128 \cdot 2 = 131{,}072$ bytes, i.e. **128 KiB per token**. An 8k-token conversation holds 1 GiB of cache, which has to be read on every decode step as well.
+
+### Where the energy goes
+
+The punchline for energy: moving a value from DRAM costs on the order of a hundred times more energy than doing arithmetic on it [@horowitz2014energy]. Decode is dominated by exactly that: shuffling weights and KV cache from HBM to the compute units, over and over, once per generated token. The actual "creative" step, picking the next token, is almost free in comparison.
+
+### The sampling step is a Boltzmann distribution
+
+Let's look at that last step more closely, because this is where the thermodynamic story begins. Given logits $z_1, \dots, z_V$, the model samples token $i$ with probability
+
+$$
+p(i) = \frac{e^{z_i / T}}{\sum_{j=1}^{V} e^{z_j / T}},
+$$
+
+where $T$ is the *temperature* knob you may know from LLM APIs. Compare that to the Boltzmann distribution from the primer, $p(x) \propto e^{-E(x)/kT}$. They are the same formula, with energy $E_i = -z_i$. **Every LLM already ends with a Boltzmann sampler**, just one that is simulated in floating point on a GPU.
+
+```{ojs}
+viewof T = Inputs.range([0.1, 2], {value: 1, step: 0.05, label: "Temperature T"})
+```
+
+```{ojs}
+//| label: fig-temperature
+//| fig-cap: "Next-token distribution for *\"The capital of France is …\"* with made-up logits. Low temperatures freeze the distribution onto the most likely token; high temperatures flatten it."
+{
+  const logits = [["Paris", 6.1], ["Lyon", 3.2], ["France", 2.9], ["the", 2.4], ["a", 1.8], ["Nice", 1.5], ["Berlin", 0.4]];
+  const w = logits.map(([, z]) => Math.exp(z / T));
+  const Z = d3.sum(w);
+  const data = logits.map(([token], i) => ({token, p: w[i] / Z}));
+  return Plot.plot({
+    width: 640,
+    x: {domain: data.map(d => d.token), label: null},
+    y: {domain: [0, 1], label: "↑ p(token)", grid: true},
+    marks: [
+      Plot.barY(data, {x: "token", y: "p", fill: "#00bc8c"}),
+      Plot.text(data, {x: "token", y: "p", text: d => (100 * d.p).toFixed(1) + "%", dy: -8}),
+      Plot.ruleY([0]),
+    ]
+  });
+}
+```
+
+So can we just replace the sampler with a thermodynamic chip? We could, but it would be pointless. A categorical distribution over 128k entries is a tiny computation; the expensive part is everything *before* it, the forward pass that produces the logits. To gain anything, the thermodynamic hardware has to take over the heavy lifting, not just the last step.
+
+## Part 2: Serving the same request on a thermodynamic processor
+
+From here on we enter speculation. Assume a mature *thermodynamic sampling unit* (TSU): millions of p-bits, programmable couplings with enough precision, fast enough I/O, and, crucially, a language model that was designed for it and matches today's quality.
+
+### A different kind of model
+
+A TSU does not execute a transformer. It samples from an energy function over binary variables $s \in \{0, 1\}^n$ of the form
+
+$$
+E(s) = -\sum_i h_i\, s_i \;-\; \sum_{(i,j) \in G} J_{ij}\, s_i s_j ,
+$$
+
+where $h_i$ are per-cell biases, $J_{ij}$ are coupling strengths, and $G$ is the chip's (sparse, local) wiring graph. Each cell repeatedly updates itself given its neighbours. The probability of a cell landing on 1 is a sigmoid of its local field:
+
+$$
+P(s_i = 1 \mid s_{-i}) = \sigma\!\left(\frac{h_i + \sum_{j} J_{ij} s_j}{T}\right), \qquad \sigma(u) = \frac{1}{1 + e^{-u}} .
+$$
+
+This is exactly the Gibbs sampling loop from the primer, done by physics instead of by arithmetic. Cells that aren't neighbours update simultaneously, so one *sweep* over millions of cells takes about as long as updating one.
+
+A language model for this hardware therefore has to express *"which tokens come next, given the context"* as such an energy function:
+
+$$
+p_\theta(x \mid c) \propto \exp\!\big(-E_\theta(x;\, c)\, /\, T\big),
+$$
+
+where $x$ is a binary encoding of the next tokens (a vocabulary of 128k entries needs only $\lceil \log_2 128{,}000 \rceil = 17$ bits per token) and $c$ is the context. The temperature knob is now literally a temperature, or rather the analog control that plays its role.
+
+Two ingredients make this plausible:
+
+- **Generate blocks, not single tokens.** *Diffusion language models* already generate text by starting from a fully masked block and iteratively denoising it [@nie2025llada]. Extropic's denoising thermodynamic models apply the same idea to TSUs, chaining a handful of energy-based models, each of which the chip samples from directly [@jelincic2026]. Instead of one token per network pass, a block of $k$ tokens emerges after a few denoising steps.
+- **Keep a digital front-end.** Attention over a long context is not something local p-bit wiring is good at. A realistic design keeps a (smaller) digital network that reads the context and turns it into the biases $h(c)$ for the TSU. That is the split Extropic's Z1T models use, with a companion FPGA next to the thermodynamic chip [@extropic-z1t].
+
+### The life of the same request
+
+```{mermaid}
+%%| fig-cap: "The same request on a hypothetical hybrid server: the digital side encodes the context, the TSU samples blocks of tokens."
+sequenceDiagram
+    participant U as Client
+    participant C as CPU (API server)
+    participant D as Digital accelerator
+    participant T as TSU
+    U->>C: prompt (text)
+    C->>C: tokenize, schedule
+    C->>D: token IDs
+    D->>D: encode context (prefill)
+    loop for each block of k tokens
+        D->>T: biases h(c), couplings already on chip
+        loop denoising steps
+            T->>T: Gibbs sweeps until equilibrium
+        end
+        T-->>D: k tokens as bits
+        D->>D: extend context
+        D-->>C: k token IDs
+        C-->>U: detokenized text (streamed)
+    end
+```
+
+1. **Tokenization and scheduling (CPU)** stay exactly the same.
+2. **Prefill (digital).** The context still has to be read. This remains compute-bound and fits GPU-style hardware well, and a smaller encoder makes it cheaper than today.
+3. **Conditioning (digital → TSU).** Instead of producing logits, the digital side produces the bias vector $h(c)$. The couplings $J$ are the model's "weights" and stay resident on the chip. There is no weight streaming per token. **This removes the memory-bandwidth wall from Part 1.**
+4. **Sampling (TSU).** The chip runs a few denoising steps. In each, it performs Gibbs sweeps until it has equilibrated, and the read-out is a block of $k$ tokens. Sampling isn't the final 1% of the work anymore. It *is* the work.
+5. **Feedback and streaming.** The new tokens extend the context; the digital side updates its state, and the loop continues with the next block.
+
+### A simple energy model
+
+To compare the two worlds, let's write down the energy per generated token. On the GPU it is dominated by data movement, roughly
+
+$$
+E_\text{GPU} \approx \frac{2N \cdot e_\text{HBM}}{B} + 2N \cdot e_\text{FLOP} ,
+$$
+
+with $e_\text{HBM}$ the energy per byte read from memory and $e_\text{FLOP}$ the energy per operation. On the hybrid system, with $n_\text{steps}$ denoising steps of $n_\text{sweeps}$ Gibbs sweeps over $M$ p-bits each, and $e_\text{flip}$ the energy of one p-bit update:
+
+$$
+E_\text{hybrid} \approx \underbrace{E_\text{digital} + E_\text{I/O}}_\text{still conventional} \;+\; \frac{n_\text{steps} \cdot n_\text{sweeps} \cdot M \cdot e_\text{flip}}{k} .
+$$
+
+The TSU term can be tiny: no weights move, $e_\text{flip}$ is small, and the cost is shared by $k$ tokens. But the first term doesn't go away. This is Amdahl's law in energy form. If a fraction $\varphi$ of today's energy moves to hardware that is $s$ times more efficient, the overall gain is
+
+$$
+G(\varphi, s) = \frac{1}{(1 - \varphi) + \varphi / s} \;\le\; \frac{1}{1 - \varphi} .
+$$
+
+```{ojs}
+//| label: fig-amdahl
+//| fig-cap: "System-level energy gain G for different fractions φ of the work moved onto a TSU that is s times more efficient. The flat tails are the conventional parts of the system."
+{
+  const ss = d3.range(0, 4.01, 0.05).map(e => 10 ** e);
+  const phis = [0.5, 0.9, 0.99, 0.999];
+  const data = phis.flatMap(phi => ss.map(s => ({phi: `φ = ${phi}`, s, G: 1 / ((1 - phi) + phi / s)})));
+  return Plot.plot({
+    width: 640,
+    x: {type: "log", label: "TSU efficiency advantage s →", grid: true},
+    y: {type: "log", label: "↑ System-level gain G", grid: true},
+    color: {legend: true, scheme: "viridis"},
+    marks: [
+      Plot.line(data, {x: "s", y: "G", stroke: "phi", strokeWidth: 2.5}),
+    ]
+  });
+}
+```
+
+The plot makes the main point of this post visible: **a 10,000× better sampler buys a 10× better system if 90% of the work moves to it.** This is the gap between the headline numbers and system-level reality that the primer warned about. In Extropic's own Z1T estimates the companion FPGA, not the thermodynamic chip, consumes over 95% of the energy [@aiwiki-extropic]. A thermodynamic LLM server only pays off if the model is designed so that almost all of the work happens in the sampler, and the digital front-end stays small.
+
+### What changes, and what doesn't
+
+| | GPU today | Hybrid with TSU (hypothetical) |
+|---|---|---|
+| **Model weights** | Streamed from HBM on every decode step | Resident on chip as couplings $J$ |
+| **Bottleneck** | Memory bandwidth (decode) | Mixing time, digital front-end, I/O |
+| **Unit of generation** | 1 token per forward pass | Block of $k$ tokens per denoising chain |
+| **Randomness** | Pseudo-random numbers + softmax | Thermal noise, native |
+| **Temperature** | A scalar in the softmax | A physical control on the chip |
+| **Long context** | KV cache in HBM | Still digital, still a KV-cache-like problem |
+| **Batching** | Essential to amortise weight reads | Less critical, no weight reads to amortise |
+
+Some things are worth pointing out:
+
+- **The memory wall disappears, and a new one appears.** Instead of bytes per second, the limiting factor becomes how many sweeps the chip needs to reach equilibrium (its *mixing time*). Hard, multimodal distributions mix slowly, and a model that is cheap per sweep but needs a million sweeps gains nothing.
+- **Batching becomes less important.** Today, batching exists mostly to amortise weight reads. If the weights never move, a single user's request is not a waste of the hardware, which could make local, low-latency inference much more attractive.
+- **The compiler problem changes.** Instead of tiling matrix multiplications for caches and tensor cores, a toolchain would have to map a sparse energy function onto a fixed physical wiring graph, choose update schedules (which cells may flip simultaneously) and trade sweeps for accuracy. This looks a lot more like place-and-route for FPGAs than like CUDA.
+
+## Wrapping up
+
+Today, an LLM answers a prompt with a compute-bound prefill followed by a long, memory-bound decode loop, and it only touches randomness in its very last, cheapest step, through a softmax that is secretly a Boltzmann distribution. A thermodynamic processor turns this upside down: the weights stay put as physical couplings, sampling becomes the main event, and tokens can emerge in blocks from a denoising chain rather than one per pass.
+
+Whether that future arrives depends on the problems we generously assumed away. But the exercise shows where the potential really is, and where it isn't. Replacing the sampler alone does nothing. The gains only come from rebuilding the model around the hardware, and they are capped by whatever stays digital.

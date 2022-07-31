@@ -1,0 +1,95 @@
+---
+title: "Two clocks start on 11 September"
+date: 2026-07-04
+description: "The Cyber Resilience Act's first enforceable obligation arrives on 11 September 2026 — and it applies to products already on the market. What the reporting regime actually demands, and why supply-chain visibility is the hard part."
+categories: [cra, regulation, supply-chain-security, sbom, vulnerability-management]
+---
+
+Most companies I talk to have filed the Cyber Resilience Act under "December 2027 problem". That is when the essential requirements bite, when CE marking needs a cybersecurity dimension, when products that don't comply can no longer be placed on the EU market. Plenty of time, goes the reasoning, especially since the harmonised standards aren't even finished.
+
+The reasoning is wrong on one important point. The first enforceable obligation of the CRA does not arrive in December 2027. It arrives on **11 September 2026**, and unlike almost everything else in the regulation, it comes with no grandfathering.
+
+## What actually changes on 11 September
+
+From that date, Article 14 applies: any manufacturer of a product with digital elements sold in the EU must report two kinds of events.
+
+The first is an **actively exploited vulnerability** in one of its products — a vulnerability that someone is actually using against real systems, not merely one that exists. The second is a **severe incident having an impact on the security of the product**, which the regulation defines roughly as anything that compromises the product's ability to protect data or that enables the introduction or execution of malicious code.
+
+Both trigger the same unforgiving cadence:
+
+```{mermaid}
+flowchart TB
+    subgraph V["Actively exploited vulnerability"]
+        direction LR
+        v0([Awareness]) -- "24 h" --> v1[Early warning]
+        v1 -- "72 h from awareness" --> v2[Vulnerability notification]
+        v2 -- "14 days after a fix or mitigation exists" --> v3[Final report]
+    end
+    subgraph I["Severe incident"]
+        direction LR
+        i0([Awareness]) -- "24 h" --> i1[Early warning]
+        i1 -- "72 h from awareness" --> i2[Incident notification]
+        i2 -- "1 month after the notification" --> i3[Final report]
+    end
+```
+
+Reports go simultaneously to the CSIRT designated as coordinator in your member state — for German manufacturers, the BSI — and to ENISA, through a new **single reporting platform** that ENISA is required to have operational on the same day the obligation starts. Nobody has production experience with that platform, for the simple reason that it doesn't exist in production yet. On top of the regulator-facing reports, Article 14 also requires you to inform impacted users — and where appropriate, all users — about the vulnerability or incident and what they can do about it.
+
+For orientation, here is where 11 September sits in the overall CRA schedule:
+
+```{mermaid}
+timeline
+    title CRA application timeline
+    10 Dec 2024 : Regulation (EU) 2024/2847 enters into force
+    11 Jun 2026 : Rules for notified bodies and conformity assessment apply
+    11 Sep 2026 : Article 14 reporting obligations apply
+                : ENISA single reporting platform goes live
+    11 Dec 2027 : Full application — essential requirements, CE marking, market surveillance
+```
+
+## No grandfathering
+
+This is the part that catches people. The CRA's transitional provisions (Article 69) exempt products placed on the market before 11 December 2027 from the essential requirements, unless they are substantially modified. But the same article carves out an explicit derogation: the Article 14 reporting obligations apply to **all in-scope products already on the market**.
+
+Your 2019 firmware counts. The legacy product line you stopped actively developing but still sell counts. The white-labelled device you rebadge and sell under your own name counts — under the CRA, putting your name on it makes you the manufacturer.
+
+If a vulnerability in any of those products starts being exploited in the wild after 11 September, the 24-hour clock starts the moment you become aware of it. Not the moment you confirm it, reproduce it, or have a patch. Aware.
+
+## Why this is harder than it sounds
+
+On paper, this looks like a paperwork exercise: fill in a form within a day. In practice, three things make it genuinely difficult.
+
+**The trigger is awareness of exploitation, and exploitation mostly happens in code you didn't write.** The phrase in Article 14 is a vulnerability "contained in the product". That includes every third-party library, every open source dependency, every SoC vendor's SDK baked into your product. Look at the vulnerabilities that have actually been exploited at scale in recent years — Log4Shell, the libwebp zero-day, MOVEit, the xz backdoor attempt — and notice that for most affected vendors, the vulnerable code was somebody else's. The question you have to answer in hours, not weeks, is: *is this exploited component in any product we ship, in an exploitable configuration?* If your SBOMs are PDFs generated once at release and filed away, you cannot answer that question. If you have no structured intake for exploitation intelligence — CISA KEV, your national CSIRT's advisories, researcher reports, customer tickets — you may not even know the clock has started.
+
+**"Severe incident" is a judgment call made under time pressure.** Whether an event "negatively affects the ability of the product to protect the availability, authenticity, integrity or confidentiality of data" is the kind of question legal and engineering can debate for a week. You have a day. The only workable answer is to make the classification decision *before* the incident: written criteria, worked examples for your own product portfolio, and a named person empowered to make the call at 02:00 on a Saturday.
+
+**Reporting an unpatched, actively exploited vulnerability to authorities is uncomfortable — by design.** The early warning will often describe a zero-day for which you have no fix yet. Industry raised exactly this concern during the legislative process — that the regime concentrates knowledge of exploitable vulnerabilities across a network of agencies — and the final text does contain safeguards allowing dissemination of a report to be limited on justified cybersecurity grounds. But the tension with coordinated vulnerability disclosure practice is real, and your disclosure policy, your PSIRT playbooks, and your legal review process all need to accommodate a regulator sitting in the loop from hour 24.
+
+And this regime does not exist in isolation. A single event can simultaneously be a CRA product vulnerability report, a NIS2 incident for your own infrastructure, a GDPR personal data breach, and — if your customers are financial entities — the subject of frantic DORA-driven questionnaires from their side. Same facts, different clocks, different recipients, different severity thresholds. If those workflows live in four different teams that have never run an exercise together, September will be educational.
+
+## The supply-chain view
+
+For people working in supply-chain security specifically, Article 14 is the visible tip of a larger shift: the CRA turns component-level visibility from a best practice into legal infrastructure.
+
+Two provisions matter beyond the reporting duty itself. Article 13 obliges manufacturers to exercise due diligence when integrating third-party components, and — less noticed — to report vulnerabilities they discover *in* a component back to whoever maintains it, including open source maintainers. Vulnerability information is now legally expected to flow both up and down the chain. Meanwhile, open source projects themselves are largely out of scope unless commercialised, and the new "open-source steward" category (foundations and similar) carries a deliberately lighter regime.
+
+The practical consequence is already observable: obligations propagate contractually. Manufacturers who must report within 24 hours are pushing 24-hour notification clauses onto their component suppliers, who push them onto theirs. If you sell software or hardware that ends up inside somebody else's product, CRA-shaped clauses are coming to your contracts regardless of whether the regulation names you directly. Expect the same dynamic that DORA triggered in financial services — a wave of supplier questionnaires and register entries — this time for anything with a processor in it.
+
+The honest test of your program is simple to state: when the next Log4Shell lands, how long does it take you to produce a complete, confident list of affected products and versions? If the answer is "a few hours", Article 14 is a formality. If the answer is "we'd start by emailing product teams", the regulation has just put a price on that gap — formally up to €15 million or 2.5% of global turnover, practically the chaos of doing archaeology on your own portfolio with a regulator waiting.
+
+## Ten weeks, concretely
+
+Enforcement on day one will presumably focus on the unprepared rather than the imperfect, and the harmonised standards are still in the pipeline (the first of the prEN 40000 series are expected around Q3 2026). But the reporting duty doesn't depend on any standard. Between now and September, a realistic minimum looks like this:
+
+1. **Inventory what's in scope.** Every product with digital elements you place on the EU market, including legacy and white-labelled lines. This list is shorter to compile than you fear and longer than you expect.
+2. **Establish one intake for exploitation awareness.** KEV feeds, CSIRT advisories, researcher contact point, support-ticket escalation — all converging on one queue someone actually watches, weekends included.
+3. **Make SBOMs queryable.** Not documents; data. The question "which products contain component X at version Y" must be answerable by a query, not a project.
+4. **Pre-write the reports.** Templates for the 24-hour early warning and the 72-hour notification, with the fields the single reporting platform expects. Decide now who drafts, who reviews, who submits.
+5. **Define "severe" for your products.** Written classification criteria with worked examples, and a named decision-maker with a deputy.
+6. **Run one exercise.** Pick a past incident or a hypothetical exploited dependency and walk the full chain — detection to early warning to user notification — against the real clocks. The first dry run always fails. Better in July than in September.
+
+The CRA's December 2027 requirements will dominate compliance budgets for the next eighteen months. But 11 September is the date on which the regulation stops being a document and starts being a stopwatch — and it measures something no policy can fake: whether you actually know what is in the products you ship.
+
+---
+
+*Further reading: the [official CRA summary](https://digital-strategy.ec.europa.eu/en/policies/cra-summary) and [reporting obligations overview](https://digital-strategy.ec.europa.eu/en/policies/cra-reporting) from the European Commission, ENISA's [Single Reporting Platform page](https://www.enisa.europa.eu/topics/product-security-and-certification/single-reporting-platform-srp), the [full text of Article 14](https://www.european-cyber-resilience-act.com/Cyber_Resilience_Act_Article_14.html), and the [BSI's CRA resources](https://www.bsi.bund.de/EN/Themen/Unternehmen-und-Organisationen/Informationen-und-Empfehlungen/Cyber_Resilience_Act/cyber_resilience_act_node.html) (German).*

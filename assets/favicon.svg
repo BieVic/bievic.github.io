@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="7" fill="#222"/>
+  <g fill="none" stroke="#00bc8c" stroke-width="2.8" stroke-linecap="round" transform="translate(0 2.5)">
+    <!-- the loop... -->
+    <path d="M17 13 A6 6 0 1 0 11 19 H13"/>
+    <!-- ...unrolled into straight-line iterations -->
+    <path d="M17 19 H19.5 M23.5 19 H26"/>
+  </g>
+</svg>

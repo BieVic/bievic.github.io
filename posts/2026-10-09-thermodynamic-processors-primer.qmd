@@ -1,0 +1,154 @@
+---
+title: "Thermodynamic Processors: A Primer"
+date: 2026-10-02
+description: "Chips that compute by letting thermal noise do the work: how thermodynamic sampling units work, who is building them, and what to doubt in the headline numbers."
+categories: [hardware, ai, thermodynamic-computing, energy-based-models]
+bibliography: thermodynamic-processors.bib
+nocite: |
+  @aria2026, @spectrum2025
+---
+
+Thermodynamic processors are chips that compute by letting random physical noise do the work, instead of spending energy to suppress it. They target one specific job that modern AI does constantly: drawing random samples from probability distributions. And they promise to do it with orders of magnitude less energy than a GPU.
+
+Every chip you own is built on a single promise: a transistor is either on or off, and nothing in between ever leaks through. Keeping that promise is expensive. Engineers spend enormous effort holding voltages high enough above the electronic jitter of warm silicon that a 1 never flips to a 0. Then, ironically, a large share of today's AI workloads takes those perfectly deterministic bits and uses them to simulate randomness.
+
+Thermodynamic computing asks an obvious-sounding question: if the algorithm wants randomness, and the hardware is naturally random, why pay twice? This primer explains what that means, how the chips work, and where the idea stands as of late 2026.
+
+## The problem: AI is hitting an energy wall
+
+Energy, not raw chip speed, is becoming the binding constraint on AI. Moore's Law has slowed, energy per operation has largely plateaued, and data centers are now limited by how much power and cooling they can get. Building more GPUs scales the bill linearly with the ambition.
+
+There is also a mismatch hiding inside the workload. Generative AI is, at its core, a sampling problem:
+
+- **Training** learns a probability distribution from data (what images, sentences or molecules tend to look like).
+- **Inference** draws samples from that distribution (a new image, the next token, a candidate molecule).
+
+A digital chip has no native way to be random. It generates pseudo-random numbers with arithmetic, then pushes them through long chains of multiply-and-add to shape them into the right distribution. Diffusion models make this especially vivid: they start from pure noise and spend dozens to hundreds of network passes gradually turning it into an image.
+
+So the stack looks like this: physics gives us noisy transistors, we spend energy making them perfectly deterministic, and then we spend more energy faking randomness on top. Thermodynamic computing tries to remove both layers of waste.
+
+```{mermaid}
+%%| fig-cap: "The digital path spends energy twice, once removing noise and again faking it; the thermodynamic path skips both."
+flowchart LR
+    N([Thermal noise in silicon])
+    subgraph D["Digital"]
+        direction LR
+        d1["Suppress noise<br/>(energy)"] --> d2[Deterministic bits] --> d3["Fake randomness<br/>with arithmetic (energy)"] --> d4([Sample])
+    end
+    subgraph T["Thermodynamic"]
+        direction LR
+        t1[Let noise drive the circuit] --> t2([Sample])
+    end
+    N --> d1
+    N --> t1
+```
+
+## The core idea: let physics do the sampling
+
+A physical system sitting in a warm environment already samples from a probability distribution for free. That is the whole trick.
+
+Think of a ball in a hilly landscape that is being constantly shaken. It rolls around at random, but it spends most of its time in the valleys and rarely sits on the peaks. Watch it long enough and the fraction of time it spends at each spot follows a precise rule from 19th-century statistical physics, the Boltzmann distribution:
+
+$$p(x) \propto e^{-E(x)/kT}$$
+
+Here $E(x)$ is the "energy" (the height of the landscape) at state $x$, $T$ is temperature (how hard the shaking is), and $k$ is Boltzmann's constant. Low-energy states are exponentially more likely.
+
+Now flip it around. If you can design the landscape by setting $E(x)$ so that its valleys correspond to the things you want (realistic images, good solutions to an optimization problem), then simply letting the system jiggle and taking snapshots gives you samples from exactly the distribution you care about. No pseudo-random number generator, no long chains of arithmetic.
+
+This maps directly onto a family of machine-learning models called *energy-based models*, which describe data by an energy function rather than an explicit formula for probabilities. On a GPU these models are notoriously slow to sample from. On thermodynamic hardware, sampling is what the hardware does by default.
+
+## How a thermodynamic processor works
+
+A thermodynamic processor takes the parameters of a probability distribution as input and returns samples from it as output. That is why Extropic calls its chips Thermodynamic Sampling Units (TSUs) rather than processing units [@extropic-tsu101].
+
+### The building block: a probabilistic bit
+
+The simplest version starts with a *p-bit* (probabilistic bit). An ordinary bit is a light switch. A p-bit is a weighted coin that flips itself continuously.
+
+In Extropic's all-transistor design, a p-bit's output voltage wanders randomly between high (1) and low (0), driven by the natural thermal noise in its transistors. A single control voltage sets the bias: turn it up and the p-bit spends, say, 80% of its time at 1. Reading the voltage at any moment gives you one random sample. The company reports that one X0 p-bit design settles in roughly 100 nanoseconds, and claims each flip costs far less energy than a single floating-point addition on a conventional chip [@extropic-tsu101].
+
+### From coins to a computer
+
+One weighted coin is not useful. The power comes from wiring many of them together so that each one's bias depends on its neighbours. The chip then runs a loop that statisticians call *Gibbs sampling*:
+
+1. **Program the landscape.** Load the model's parameters onto the chip: a bias for each p-bit and a coupling strength for each wire between neighbours. Together these define the energy function $E(x)$.
+2. **Each cell listens to its neighbours.** It sums up their current states, weighted by the couplings, plus its own bias.
+3. **Each cell flips its weighted coin.** That sum sets the p-bit's probability of landing on 1, and the noise does the rest.
+4. **Repeat in parallel.** Cells that aren't neighbours update at the same time, so a bigger chip doesn't make each step slower.
+5. **Read out.** After enough rounds, the pattern of 1s and 0s across the chip is a sample from the programmed distribution. Keep running to get more.
+
+Two design choices make this efficient. Memory and compute live in the same place, so there is no shuttling of data between a processor and RAM, which is where much of a GPU's energy goes. And each cell only talks to nearby cells, which keeps wires short and cheap.
+
+### Two flavours of hardware
+
+The two best-known startups take different physical routes to the same idea.
+
+|                  | Extropic                                                         | Normal Computing                                                         |
+|------------------|------------------------------------------------------------------|--------------------------------------------------------------------------|
+| **Basic unit**   | p-bits (discrete 0/1), plus multi-level and Gaussian variants    | Continuous "s-units": analog voltages in resonant circuits               |
+| **Physics**      | Thermal noise in ordinary CMOS transistors                       | Coupled oscillators settling into thermal equilibrium (Langevin dynamics) |
+| **Native operation** | Sampling from energy-based models (Ising-style)              | Gaussian sampling and linear algebra, e.g. matrix inversion              |
+| **Flagship chip** | Z1: 269,568 p-bits, under 1 W (taped out 2026)                  | CN101 (taped out June 2025); CN201 and CN301 planned                     |
+
+Normal's matrix-inversion trick is a good example of how strange and elegant this can be [@normal-matrix-inversion]. You encode a matrix $A$ into the couplings between a set of oscillators, let the system reach thermal equilibrium, and measure how the voltages fluctuate together. That covariance turns out to be proportional to the inverse of the matrix you put in:
+
+$$\mathrm{Cov}(x) \propto A^{-1}$$
+
+The physics solved the equation; you just watched.
+
+## What it's good for (and what it isn't)
+
+Thermodynamic processors are accelerators for probabilistic work, not replacements for CPUs or GPUs. You will never run a web browser on one. The promising targets are:
+
+- **Generative models built for sampling.** Extropic's Denoising Thermodynamic Model borrows the structure of a diffusion model, but instead of hundreds of small deterministic denoising steps, it chains a handful of energy-based models that the chip samples from directly [@jelincic2026].
+- **Sparse language models.** In September 2026 Extropic published Z1T, a family of sparse, transformer-like models redesigned to fit the chip's 16-neighbour wiring, with open weights on Hugging Face [@extropic-z1t].
+- **Linear algebra.** Normal Computing's continuous-variable hardware can invert matrices and solve linear systems by letting oscillators equilibrate. These operations sit underneath much of scientific computing and machine learning.
+- **Bayesian inference and uncertainty.** Any model that wants a distribution of plausible answers rather than one best guess, such as weather forecasting, financial risk or robotics under uncertainty.
+- **Optimisation.** Many hard scheduling and routing problems can be written as "find the lowest valley in an energy landscape", which is exactly what these systems explore.
+
+The realistic picture is heterogeneous: a server where a CPU orchestrates, a GPU does dense matrix maths, and a thermodynamic chip handles the sampling-heavy parts. Both Extropic and Normal describe their chips as cards that sit alongside existing accelerators.
+
+## Who's building it, and where things stand
+
+As of October 2026, thermodynamic computing has real silicon but no commercial deployments yet. Two US startups lead, both founded in 2022 by alumni of Google's quantum and AI research groups.
+
+**Extropic** builds all-transistor p-bit chips in standard CMOS. Its Z1 chip packs 269,568 p-bits into a die under 12 mm per side drawing under 1 W, and is due in M.2 sticks, PCIe cards and a planned billion-p-bit cluster with early access in 2027 [@extropic-z1]. It publishes open-source software (THRML for simulation, Torx for programming) so developers can build for the hardware before it ships.
+
+**Normal Computing** builds continuous-variable analog chips under what it calls the Carnot architecture, targeting up to 1000x energy efficiency on selected AI and scientific workloads. Its 2025 *Nature Communications* paper demonstrated an eight-cell circuit-board prototype [@melanson2025]; CN101 is its first silicon [@normal-cn101].
+
+| Date     | Milestone                                                                                              |
+|----------|--------------------------------------------------------------------------------------------------------|
+| Sep 2026 | Extropic releases Z1T sparse transformer-like models with open weights [@extropic-z1t]                  |
+| Aug 2026 | Extropic says Z1 has taped out; launches Torx framework and simulator API [@extropic-z1]               |
+| Jul 2026 | Extropic signs a non-binding letter of intent for up to \$75M from the US Commerce Department's CHIPS R&D office [@iconnect-loi] |
+| Jul 2026 | Extropic's diffusion-like-model paper published in *npj Unconventional Computing* [@jelincic2026]       |
+| Mar 2026 | Normal Computing raises \$50M led by Samsung Catalyst [@fortune2026]                                   |
+| Oct 2025 | Extropic launches X0 prototype chip, XTR-0 dev platform and THRML library [@extropic-tsu101]               |
+| Aug 2025 | Normal's CN101 produces its first data in testing                                                       |
+| Jun 2025 | Normal tapes out CN101, billed as the first thermodynamic computing chip [@normal-cn101]                |
+| Apr 2025 | Normal publishes its stochastic processing unit prototype in *Nature Communications* [@melanson2025]    |
+
+The idea itself is not new. Boltzmann machines, the neural networks Geoffrey Hinton and colleagues described in 1985, are exactly the kind of model these chips run, and academic groups have built p-bit hardware for years. What changed is the push to make it scalable in mainstream semiconductor processes, and AI's energy bill gave it a market.
+
+## Caveats: read the fine print on "10,000x"
+
+The headline efficiency numbers are projections, not measurements of shipping products. Treat them as hypotheses that 2027 hardware will test [@aiwiki-extropic].
+
+- **The big multipliers come from simulation.** Extropic's widely quoted ~10,000x figure comes from a hardware model of a Z1-like chip generating low-resolution Fashion-MNIST clothing images, a simple benchmark far from a frontier image or language model. Its Z1T language-model estimates (about 14x to 139x over an Nvidia H100 per token) depend on assumed GPU utilisation and exclude parts of the workload.
+- **The rest of the system still costs energy.** In the Z1T estimates, the companion FPGA, not the thermodynamic chip, consumes over 95% of the energy. Gains on the chip can be swallowed by the conventional hardware around it.
+- **Algorithms have to be rebuilt.** Today's models were co-designed with GPUs. To use these chips, models must be reshaped into sparse, locally connected, energy-based forms, and Extropic's own study found its sparse models need roughly ten times more training compute to match a dense GPT-2.
+- **Scaling is unproven.** Small prototypes work; whether useful signals survive at millions of cells, across manufacturing variation and chip-to-chip communication, is the open question both companies are now trying to answer.
+- **Analog is hard.** Continuous-variable designs like Normal's must cope with component tolerances and calibration drift, which is why the history of analog computing is full of promising prototypes that digital chips overtook.
+
+None of this means the idea fails. It means the next 12 to 18 months, when independent benchmarks on real Z1 and CN-series hardware become possible, matter more than any press release.
+
+## The takeaway
+
+Thermodynamic computing flips the oldest rule in chip design: instead of fighting noise, it uses noise as the engine. Because so much of modern AI is really about drawing samples from probability distributions, hardware that samples natively could do that job with far less energy than a GPU simulating randomness through arithmetic.
+
+The physics is sound and the first chips exist. What remains unproven is whether the advantage survives at scale, on real workloads, inside full systems. If it does, the AI data center of the 2030s may look less like a wall of identical GPUs and more like a mixed rack, where some chips calculate and others simply let physics settle into the answer.
+
+## Sources
+
+::: {#refs}
+:::
