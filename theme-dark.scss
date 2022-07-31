@@ -1,0 +1,81 @@
+/*-- scss:defaults --*/
+// "thermir" palette, dark mode: ink navy ground, warm off-white text,
+// bright orange + sky blue accents. Layered on top of cyborg; only colours change.
+
+$ink-deep:    #141A26;
+$ink-panel:   #1B2230;
+$ink-line:    #2E3748;
+$on-ink:      #EDE9E0;
+$on-ink-muted:#AEB6C4;
+$on-ink-dim:  #8C96A8;
+$orange:      #E4572E;
+$orange-hl:   #F27A50;
+$sky:         #78AEEA;
+
+// cyborg derives most surfaces from these
+$gray-400:    $on-ink-muted;
+$gray-600:    $on-ink-dim;
+$gray-700:    $ink-line;
+$gray-800:    $ink-panel;
+$gray-900:    $ink-deep;
+
+$primary:     $orange-hl;
+$secondary:   $ink-line;
+$info:        $sky;
+$success:     $sky;
+$warning:     $orange-hl;
+$danger:      $orange;
+$light:       $on-ink-muted;
+$dark:        $ink-panel;
+
+$body-bg:     $ink-deep;
+$body-color:  $on-ink;
+$contrast-bg: $on-ink;
+$headings-color: $on-ink;
+$text-muted:  $on-ink-muted;
+$link-color:  $orange-hl;
+$border-color: $ink-line;
+$hr-border-color: $ink-line;
+
+$table-color:        $on-ink;
+$table-border-color: $ink-line;
+$table-dark-bg:      $ink-panel;
+$table-dark-border-color: $ink-line;
+
+$dropdown-bg:         $ink-panel;
+$dropdown-divider-bg: $ink-line;
+$dropdown-link-color: $on-ink;
+$dropdown-link-hover-color: $ink-deep;
+$dropdown-link-hover-bg: $orange-hl;
+
+$input-bg:            $ink-panel;
+$input-color:         $on-ink;
+$input-border-color:  $ink-line;
+$input-group-addon-bg: $ink-line;
+$input-group-addon-color: $on-ink;
+$form-check-input-bg: $ink-panel;
+
+$nav-tabs-border-color: $ink-line;
+$nav-tabs-link-active-color: $on-ink;
+
+$navbar-bg:   #0F141E;
+$navbar-fg:   $on-ink;
+$navbar-hl:   $orange-hl;
+$footer-bg:   $ink-deep;
+$footer-fg:   $on-ink-muted;
+
+$code-color:          $sky;
+$code-bg:             $ink-panel;
+$code-block-bg:       $ink-panel;
+$code-block-border-left: $orange;
+
+$callout-color-note:      $sky;
+$callout-color-tip:       $orange-hl;
+$callout-color-important: $orange-hl;
+$callout-color-caution:   $orange;
+$callout-color-warning:   $orange;
+
+$toc-color:   $orange-hl;
+
+/*-- scss:rules --*/
+::selection { background: $ink-line; }

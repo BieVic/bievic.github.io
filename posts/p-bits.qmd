@@ -1,0 +1,411 @@
+---
+title: "A weighted coin with an input wire"
+date: 2026-11-08
+draft: false
+description: "Where p-bits actually came from: a word from 2003, an equation from 1963, a memory cell built badly on purpose, and a million-p-bit machine with no physical noise in it. Who started it, what the idea is made of, what it buys, and a factoring experiment of mine that gave the wrong answer for three hours."
+categories: [hardware, thermodynamic-computing, history]
+bibliography: p-bits.bib
+echo: false
+---
+
+I've been writing "p-bit" on this blog for a month. The [primer](thermodynamic-processors-primer.qmd) called it a weighted coin that flips itself, and I moved on, because that was enough to get to the compilers, which is what I wanted to talk about. Then I went looking for who came up with it, expecting one paper and a date.
+
+There is no one paper. There's a word from 2003 that meant something different, an equation from 1963, a founding paper that says in its own text that its equations belong to someone else, and a public argument with Scott Aaronson. And the largest p-computer anyone has reported, from this summer, has no physical randomness in it at all. That last one changed how I think about the whole field, so most of this post leans towards it.
+
+I also wrote some small experiments, because I don't trust my reading of hardware papers until I've run something myself. The code is in [experiments/p-bits/](https://github.com/BieVic/bievic.github.io/tree/main/experiments/p-bits) in the blog's repository. One of those experiments gave me a clean, quotable result that turned out to be an artefact of how I'd set it up. That's in the factoring section.
+
+## The whole idea fits on one line
+
+A p-bit has one output and one input. The output is $m_i = \pm 1$. The input is a real number $I_i$, and it sets how the output is biased:
+
+$$
+m_i = \operatorname{sgn}\big(\text{rand}(-1,1) + \tanh I_i\big), \qquad
+I_i = \beta\Big(\sum_j J_{ij}\, m_j + h_i\Big)
+$$
+
+The first equation is the coin. Draw a uniform random number, add $\tanh I_i$, keep the sign. At $I_i = 0$ you have a fair coin. At $I_i = 2$ the output is $+1$ about 98% of the time. In general $P(m_i = +1) = (1 + \tanh I_i)/2$. So this is a coin that has an input wire, which is the thing an ordinary random number generator doesn't have.
+
+The second equation says where the input comes from: add up your neighbours' outputs, each with a weight, plus a bias of your own. $\beta$ is an inverse temperature and scales everything. Update p-bits one at a time this way and the network settles into sampling from a Boltzmann distribution, $P(m) \propto e^{-\beta E(m)}$, with $E(m) = -\sum_{i<j} J_{ij} m_i m_j - \sum_i h_i m_i$. All of the computing happens in that sentence. You choose $J$ and $h$ so the states you want have low energy, and the network spends most of its time in them.
+
+A p-bit always has a definite value. You can look at it whenever you like and it says $+1$ or $-1$, with no superposition and no interference. A Tohoku University press release called it a "poor man's q-bit" [@tohoku2019], which is a good phrase and also the source of a lot of later trouble.
+
+```{ojs}
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+```
+
+```{ojs}
+viewof pbitInput = Inputs.range([-3, 3], {value: 0.5, step: 0.1, label: "Input I"})
+viewof pbitSeed = Inputs.button("Flip again", {value: 1, reduce: v => v + 1})
+```
+
+```{ojs}
+//| label: fig-pbit
+//| fig-cap: "One p-bit over 400 updates. The thin line is its output, the thick line the running mean, which settles on tanh(I), the dashed line. Move the slider to change the input: the output never takes any value other than +1 or −1, only the share of time it spends at each changes."
+{
+  const rand = mulberry32(pbitSeed * 7919);
+  const target = Math.tanh(pbitInput);
+  const rows = [];
+  let total = 0;
+  for (let t = 1; t <= 400; t++) {
+    const m = (2 * rand() - 1) + target > 0 ? 1 : -1;
+    total += m;
+    rows.push({t, m, mean: total / t});
+  }
+  return Plot.plot({
+    width: 640,
+    height: 260,
+    marginRight: 92,
+    x: {label: "Update →"},
+    y: {label: "Output", domain: [-1.1, 1.1], ticks: [-1, 0, 1], tickFormat: d => d > 0 ? "+1" : d < 0 ? "−1" : "0"},
+    color: {legend: true, domain: ["output", "running mean"], range: ["#3987e5", "#199e70"]},
+    marks: [
+      Plot.line(rows, {x: "t", y: "m", stroke: () => "output", strokeWidth: 1, strokeOpacity: 0.45, curve: "step-after"}),
+      Plot.line(rows, {x: "t", y: "mean", stroke: () => "running mean", strokeWidth: 2}),
+      Plot.ruleY([target], {stroke: "currentColor", strokeDasharray: "4 3"}),
+      Plot.text([{t: 400, y: target}], {x: "t", y: "y", text: () => `tanh(I) = ${target.toFixed(2)}`, textAnchor: "start", dx: 6}),
+      Plot.tip(rows, Plot.pointerX({x: "t", y: "mean", title: d => `update ${d.t}\noutput ${d.m > 0 ? "+1" : "−1"}\nrunning mean ${d.mean.toFixed(3)}`})),
+    ]
+  });
+}
+```
+
+## Older than the name
+
+Read that update rule to a statistical physicist and they'll tell you it's the heat-bath rule. Roy Glauber wrote down the $\tanh$ form in 1963, for an Ising spin flipping in contact with a heat bath [@glauber1963]. He wasn't thinking about computers. He wanted to know how a magnet relaxes over time.
+
+Metropolis and his Los Alamos colleagues had already shown in 1953 that you could draw from a Boltzmann distribution by making local random moves, using one of the first electronic computers to do it [@metropolis1953]. Geman and Geman gave the one-variable-at-a-time version its name, Gibbs sampling, in 1984, in a paper about restoring images [@geman1984]. Kirkpatrick, Gelatt and Vecchi, at IBM, turned the temperature into a knob and used it on chip placement in 1983 [@kirkpatrick1983]. That's simulated annealing, and it's still what most p-bit hardware runs.
+
+The step that makes this look like a neural network came in two parts. In 1982 John Hopfield described a network of binary neurons with symmetric weights, storing memories as energy minima [@hopfield1982]. His neurons were deterministic, so they got stuck in the nearest minimum. In 1985 Ackley, Hinton and Sejnowski replaced the deterministic threshold with a noisy one [@ackley1985]. That is the p-bit equation, in full, three decades before anyone called it a p-bit. The field calls it the binary stochastic neuron.
+
+Boltzmann machines stalled for a practical reason. Their learning rule needs samples from the model's equilibrium distribution at every training step, and in software getting those is painfully slow. Hinton's 2002 contrastive divergence shortcut [@hinton2002] made training feasible by giving up on equilibrium. If you wanted a single line to explain why anyone would build this in hardware, it would be that one: the model was good and the sampling was the bottleneck. Hopfield and Hinton got the physics Nobel for this work in 2024.
+
+There's a second lineage, about randomness as a component rather than a model. Von Neumann's 1956 paper asked how to build reliable machines from unreliable parts [@vonneumann1956], with noise as the enemy to be defeated. In the 1960s, Gaines in the UK and Poppelbaum's group in Illinois went further and encoded numbers *as* probabilities on a wire, so that a single AND gate multiplies two values [@gaines1969; @alaghi2013]. Stochastic computing ran into precision problems: halving the error costs four times the pulses. But the idea that a noisy wire might be a representation rather than a defect was out there.
+
+And then there's Feynman, in the same talk everyone cites for quantum computing, given in 1981 and published in 1982. Before he gets to quantum, he considers "computer C which itself is probabilistic", in which "you always randomize the last two digit's of every number, or you do something terrible to it". Its output "is not a unique function of the input". His reaction: "Is that no good? No it's O.K." [@feynman1982]. Nature looks probabilistic, so a probabilistic simulator is a reasonable thing to want. He also notices its best feature, which is that you can get a local answer "merely by disregarding what happens elsewhere, which is no operation, nothing at all". A sample already contains its own marginals. Then he shows why this can't imitate quantum mechanics (negative probabilities), and the talk moves on to the machine people remember it for. The other machine was sitting on the same pages.
+
+## Who said "p-bit" first
+
+The word, as far as I can trace it, is Krishna Palem's. It's already in his 2003 HiPC paper [@palem2003], and his 2005 paper in *IEEE Transactions on Computers* [@palem2005] defines a PBIT as the output of a probabilistic switch, correct with probability $p$. A Georgia Tech press release from 2005 is headlined "Researchers Validate Energy Savings Of 'P-Bits'" and explains that "a PBIT is like a conventional bit in that it takes on a 0 or a 1 value", except "one is certain of its value only with a probability of p" [@gatech2005].
+
+Palem's idea points in almost the opposite direction from today's. He wanted to run CMOS at low voltage and put up with errors in return for saving energy. The noise is a price you pay. Nothing there wires a p-bit's probability to its neighbours or tries to sample a distribution. So it has the same word and largely a different concept, though the 2017 paper I'm about to get to does cite his group's probabilistic CMOS switch.
+
+The next step was at MIT. Vikash Mansinghka's thesis work on stochastic digital circuits [@mansinghka2009] built samplers from composable random gates. Separately, another MIT PhD, Ben Vigoda, had turned his own thesis work into Lyric Semiconductor, whose chips used signals that represent probabilities. It got a lot of attention in 2010 for planning a general-purpose probabilistic processor [@techreview2010]. Its first product was error correction for flash memory. Analog Devices bought it in 2011 for $27.8 million, of which $14.0 million was paid at closing and the rest was contingent [@adi2011]. I find that number sobering next to what today's companies promise, and I'm not sure what to do with it, since 2011's models and 2011's demand for samples weren't today's.
+
+The modern meaning comes from Purdue. Behin-Aein, Diep and Datta simulated a "transynapse" with a very low energy barrier in 2016 [@behinaein2016], and later that year Kerem Camsari, Rafatul Faria, Brian Sutton and Supriyo Datta posted the paper that set the terms, published in *Physical Review X* in 2017 [@camsari2017]. It introduces "unstable, stochastic units which we call 'p-bits'". And it's refreshingly direct about its debts: its Equations 1 and 2 "are essentially the same as the defining equations for Boltzmann machines introduced by Hinton and his collaborators".
+
+So what did it add? Two things, I think. The first is a job description that doesn't mention training: invertible logic, designed "in 'one shot' with no learning". The second is a sentence I keep coming back to: "p-bits need not be magnet-based: any three-terminal tunable random bit generator should be suitable."
+
+My verdict on credit: the word is Palem's, the equation is Glauber's and then Hinton's, and the idea that this is a *computing primitive you'd put on a chip and program* belongs to the Purdue group, with the MIT work as a neglected ancestor. Camsari is now at UCSB and that group, with Datta's at Purdue, has written much of the field since.
+
+## Logic that runs backwards
+
+The part of the 2017 paper I liked most is simple enough to do by hand. Take the three p-bits below, $A$, $B$ and $C$, with these weights:
+
+$$
+J = \begin{pmatrix} 0 & -1 & 2 \\ -1 & 0 & 2 \\ 2 & 2 & 0 \end{pmatrix}, \qquad
+h = \begin{pmatrix} 1 \\ 1 \\ -2 \end{pmatrix}
+$$
+
+Work out the energy of all eight states. The four rows of the AND truth table all come out at $-3$. The other four are at $+1$, except $A{=}0, B{=}0, C{=}1$, which is at $+9$. Nothing makes the wires flow in a particular direction. All you have is a landscape with four equally deep valleys, and those valleys are the truth table.
+
+Now clamp a p-bit by holding it fixed. Clamp the inputs to 1 and 1, and $C$ goes to 1, which is an AND gate. Clamp the output to 1 instead, and $A$ and $B$ both go to 1, which is the AND gate run backwards. Clamp the output to 0 and the network wanders among the three input patterns that explain it. The paper calls this invertible, and describes it as "a unique property that is absent in standard digital circuits". (Reversible logic is a different thing, with its one-to-one mappings and garbage bits. Here, running backwards just gives you the distribution of causes consistent with the effect.)
+
+```{ojs}
+viewof andClamp = Inputs.select(new Map([
+  ["Nothing clamped", {}],
+  ["Inputs A = 1, B = 1 (forwards)", {0: 1, 1: 1}],
+  ["Output C = 1 (backwards)", {2: 1}],
+  ["Output C = 0 (backwards)", {2: -1}],
+]), {label: "Clamp"})
+viewof andBeta = Inputs.range([0.1, 3], {value: 1, step: 0.05, label: "β"})
+viewof andSeed = Inputs.button("Sample again", {value: 1, reduce: v => v + 1})
+```
+
+```{ojs}
+//| label: fig-and
+//| fig-cap: "Three p-bits sampling the AND gate above, 4,000 sweeps in your browser. Bars are what the sampler visited, ticks are the exact Boltzmann probabilities. States are written ABC, and the four truth-table rows are 000, 010, 100 and 111. Lower β to melt the valleys together, or clamp the output to run the gate backwards."
+{
+  const J = [[0, -1, 2], [-1, 0, 2], [2, 2, 0]], h = [1, 1, -2];
+  const energy = m => -(J[0][1] * m[0] * m[1] + J[0][2] * m[0] * m[2] + J[1][2] * m[1] * m[2]) - (h[0] * m[0] + h[1] * m[1] + h[2] * m[2]);
+  const spins = s => [0, 1, 2].map(i => (s >> (2 - i)) & 1 ? 1 : -1);
+  const allowed = m => Object.entries(andClamp).every(([i, v]) => m[+i] === v);
+  const weights = d3.range(8).map(s => allowed(spins(s)) ? Math.exp(-andBeta * energy(spins(s))) : 0);
+  const Z = d3.sum(weights);
+  const rand = mulberry32(andSeed * 104729);
+  const m = [1, 1, 1].map((v, i) => andClamp[i] ?? (rand() < 0.5 ? 1 : -1));
+  const counts = new Array(8).fill(0), sweeps = 4000;
+  for (let t = 0; t < sweeps; t++) {
+    for (let i = 0; i < 3; i++) {
+      if (andClamp[i] !== undefined) continue;
+      let I = h[i];
+      for (let j = 0; j < 3; j++) I += J[i][j] * m[j];
+      m[i] = (2 * rand() - 1) + Math.tanh(andBeta * I) > 0 ? 1 : -1;
+    }
+    counts[m.reduce((acc, v) => acc * 2 + (v > 0 ? 1 : 0), 0)]++;
+  }
+  const rows = d3.range(8).map(s => ({
+    state: s.toString(2).padStart(3, "0"),
+    sampled: counts[s] / sweeps,
+    exact: weights[s] / Z,
+  }));
+  return Plot.plot({
+    width: 640,
+    height: 280,
+    x: {label: "State ABC", domain: rows.map(d => d.state), padding: 0.25},
+    y: {label: "↑ Probability", domain: [0, 1], grid: true},
+    color: {legend: true, domain: ["sampled", "exact"], range: ["#199e70", "#e45756"]},
+    marks: [
+      Plot.barY(rows, {x: "state", y: "sampled", fill: () => "sampled", rx: 2}),
+      Plot.tickY(rows, {x: "state", y: "exact", stroke: () => "exact", strokeWidth: 2}),
+      Plot.ruleY([0]),
+      Plot.tip(rows, Plot.pointerX({x: "state", y: "sampled", title: d => `state ${d.state}\nsampled ${d.sampled.toFixed(4)}\nexact ${d.exact.toFixed(4)}`})),
+    ]
+  });
+}
+```
+
+I ran the same thing in C, with enough sweeps that sampling error stops being interesting. At $\beta = 1$ with nothing clamped, each valid row has exact probability 0.2466 and measured 0.2466. With the output clamped to 1, state 111 has exact 0.9647 and measured 0.9646. So the claim holds, and it should, because there's no physics here yet, just the Boltzmann distribution and a correct sampler.
+
+The trick scales because energies add. Build a full adder from its own penalty, $(a + b + c_{in} - s - 2c_{out})^2$, whose zeros are exactly the valid rows. Add the penalties of many gates, sharing a p-bit wherever two gates share a wire. The sum has its minimum exactly on the states where *every* gate is happy, which is every consistent run of the whole circuit. A 32-bit adder in the 2017 paper finds its correct answer out of $2^{33}$ possibilities, and running it backwards subtracts. This is the same QUBO encoding that Lucas catalogued for a long list of NP-hard problems [@lucas2014], and it's the compile step I [wrote about in October](compiling-thermodynamic-computers.qmd). If you squint, it's a compiler target from a physics paper.
+
+One consequence looks like magic: clamp the output of a multiplier to a number and the inputs ought to settle on its factors. I'll come back to that, because it's where the arguments started.
+
+## The device is a bad memory cell
+
+Why would anyone want to build this rather than write a for-loop? Because of what a random number generator costs. A good digital one takes thousands of transistors. Meanwhile, the industry has spent decades and a great deal of money suppressing a source of randomness in its own products.
+
+An MRAM cell stores a bit in a tiny magnet, in a device called a magnetic tunnel junction, whose resistance depends on which way the magnet points. Heat tries to flip it. Louis Néel worked out the rate in 1949, $\tau = \tau_0 e^{\Delta/kT}$, for an unexpected reason: he was explaining the magnetism of baked clay [@neel1949]. Make the barrier $\Delta$ big enough, 40 to 60 $kT$ in the numbers the PRX paper quotes, and the bit lasts for years. So memory engineers make the barrier big.
+
+Make it small instead, and you've got a magnet that flips by itself. Its output is a random telegraph signal, and a current through the junction biases it. Three transistors and one of those junctions give you a p-bit. It's a failed memory cell that happens to implement $\tanh$.
+
+Borders and colleagues at Tohoku and Purdue built that in 2019: eight p-bits from modified MRAM junctions, driven by a microcontroller, in *Nature* [@borders2019]. They factored 35 with four p-bits, 161 with six, and 945 with eight. That's when the press release said "poor man's q-bit", and when Scott Aaronson wrote about it in the same breath as quantum supremacy, under the title "From quantum supremacy to classical fallacy" [@aaronson2019]. He didn't hold back: "'p-bit' devices can't scalably outperform classical computers, for the simple reason that they are classical computers". On the factoring, he sketches the admission a responsible paper would have opened with, "You're thinking that factoring an n-bit integer will self-evidently take exp(n) time by this method", then reports what he found when he looked for it in the paper, its supplement and the commentary: "Not an asymptotic runtime scaling in sight". He described the method as stochastic local optimisation that you could run on "a laptop with a random-number generator".
+
+He's right, and the p-bit people have mostly come round to saying so themselves. What his post doesn't settle is the constant factor, which is the only thing this hardware was ever going to offer.
+
+The device story has a gap that's easy to read past, though. Projections for this hardware usually assume junctions that fluctuate in about a nanosecond, and those have been shown in isolation [@safranski2021; @hayakawa2021]. A 2024 system that wired five stochastic junctions into a mostly digital p-computer used relaxation times of **1 to 20 milliseconds** [@singh2024]. Six orders of magnitude separate the demo from the slide. A bigger system appeared last year, 1,143 p-bits in 130 nm with a separate chip of voltage-controlled junctions as the entropy source [@duffee2025], and 250 junctions on an FPGA have since factored 24-bit numbers [@yang2026]. Those are real steps. They're also hundreds to thousands of times smaller than what digital logic does today, and that comparison is the next section.
+
+The other physical route skips magnets. Extropic's Z1, which you've met here before, gets its noise from ordinary transistors [@amico2026thermalizers] and is the most aggressive design I know of, at 269,568 p-bits [@extropic-onebillion]. Its energy figure, 7.09 fJ per update, comes from SPICE, and I haven't seen numbers measured on the chip.
+
+## The biggest one has no noise in it
+
+The real change came from a scheduling trick. In 2022, Aadit and colleagues noticed something about parallelism [@aadit2022]. Gibbs sampling is sequential because a p-bit needs its neighbours' current values. But two p-bits that aren't neighbours don't care about each other, so they can update at the same moment. Colour the graph so that no edge joins two nodes of the same colour, give each colour a phase-shifted clock, and every p-bit gets updated at its own pace. That's chromatic Gibbs sampling, known from the machine learning literature, done in wires. Throughput grows linearly with the number of p-bits, because adding p-bits adds clock-synchronised workers without slowing any of them down.
+
+That's why GPUs have a hard time here. Fast GPU spin-glass code nearly always uses a regular chessboard, two colours and a lattice, because that's what vectorises. Hand them an irregular graph with five or seven colours and a pile of indirection, and it stops being a GPU problem. In the same paper, 143.8 flips per nanosecond on an FPGA, with 4,793 p-bits on irregular graphs, beat published GPU and TPU numbers (5 to 18 times) that only had to do chessboards.
+
+Then in June this year came the largest one so far [@aadit2026]. One million p-bits across 18 AMD VP1902 FPGAs, reaching $10^{12}$ flips per second at 1 MHz per p-bit, $3 \times 10^{12}$ overclocked, at 1.4 to 1.6 kW. On that machine, a 13,042-variable 3SAT problem takes 250,011 p-bits and gets 99.74% of its clauses satisfied. Six of its FPGAs ran a planted Zephyr problem at 80,800 p-bits, shown as single representative runs rather than a full statistical study. A separate six-FPGA system reached the certified optimum of the 20,000-spin G81 Max-Cut benchmark, running its replicas one at a time with a MATLAB host managing the swaps. There's also a place-and-route estimate of a 7 nm ASIC partition: 8,442 p-bits at 100 MHz, in 0.66 mm², at 248 mW.
+
+This is what stopped me. The random numbers in all this come from "on-chip" linear-feedback shift registers [@aadit2026]. There's no magnet, no thermal noise and no analog anything. IEEE Spectrum put it plainly: "no physical flipping bits in this design" [@spectrum2026]. The largest p-computer ever reported is digital logic driven by pseudorandom numbers. My inference, which the paper doesn't state, is that at its conservative clock you could replay a run from a seed, since all 18 FPGAs share a master clock.
+
+So what is a p-bit, if you can build a million of them with no probabilistic physics? I think the answer was already in that 2017 sentence about "any three-terminal tunable random bit generator". **A p-bit is an interface.** It's a contract: give me an input $I$, and I'll give you a $\pm 1$ with mean $\tanh I$, without you having to wait for anything else on the chip. Nanomagnets, thermal transistor noise and LFSRs are three implementations of that contract, at different points on an area and energy curve. The contract is what makes the parallel schedule, the compiler and the algorithms portable across them. Since I'm writing a compiler for these things, thermir, I would say that, but I think it explains the field better than the magnets do.
+
+The paper's most interesting contribution is about what happens at chip boundaries. Each FPGA has its own p-bits, and only 1-bit states of boundary p-bits cross the links. If those arrive late, a p-bit computes with stale neighbours. In a deterministic chip that's a bug. Here it's a tunable approximation: the paper defines $\eta = f_\text{comm}/f_\text{p-bit}$, and shows that the quality of annealing degrades smoothly and predictably as $\eta$ falls, saturating near the exact result around $\eta \approx 300$. That is the same reason Hogwild-style parallel Gibbs works in software, and the paper says so, that "stochastic dynamics tolerate stale information gracefully". Most multi-chip accelerators have to emulate one giant synchronous chip, and this one gets to skip that.
+
+### Does the noise have to be any good?
+
+This left me with a puzzle. Singh and colleagues showed in 2024 that LFSR-driven p-bits can give biased results that never go away, and they describe reading whole words from an LFSR as a known danger [@singh2024]. Yet the million-p-bit machine uses LFSRs, and its measured annealing exponent, $\kappa \approx 0.2820$, is within the confidence interval of a GPU's $0.2836$ with a proper generator. The six-FPGA system, also on LFSRs, gets $0.2637$ against the GPU's $0.2693$ on 50,653 p-bits, and the authors put that small gap down to the generator and to fixed-point arithmetic.
+
+Both of those can't be simply true, so I tried it on the smallest circuit that seemed fair: five p-bits forming a full adder, at $\beta = 1$, against the exact distribution. I used a 32-bit LFSR with three wirings, plus xoshiro256\*\* as a reference, averaged over eight seeds.
+
+```{ojs}
+//| label: fig-lfsr
+//| fig-cap: "KL divergence between sampled and exact distributions on a five-p-bit full adder, averaged over eight seeds. Sampling error alone falls as 1/sweeps. The same LFSR either tracks xoshiro all the way down, or stops improving at a floor, depending only on how it's wired."
+{
+  const marks = [1e3, 3e3, 1e4, 3e4, 1e5, 3e5, 1e6, 3e6, 1e7, 3e7, 1e8];
+  const series = {
+    "xoshiro256**": [0.0144933, 0.0050258, 0.00156361, 0.000564238, 0.000184477, 6.37184e-05, 2.00694e-05, 6.02159e-06, 1.6469e-06, 6.04637e-07, 1.80517e-07],
+    "LFSR, 32 steps between reads": [0.0173654, 0.00614598, 0.00182372, 0.000504778, 0.000158058, 5.34576e-05, 1.73337e-05, 6.57808e-06, 1.67861e-06, 4.9663e-07, 1.58389e-07],
+    "one LFSR per p-bit, read whole": [0.0359883, 0.02227, 0.0163697, 0.0148051, 0.0138955, 0.0137305, 0.0137845, 0.0137993, 0.013768, 0.0137748, 0.0137692],
+    "one LFSR shared by all": [0.11647, 0.108002, 0.104721, 0.103205, 0.101882, 0.102692, 0.10229, 0.102504, 0.10247, 0.102399, 0.102388],
+  };
+  const names = Object.keys(series);
+  const rows = names.flatMap(rng => marks.map((sweeps, i) => ({rng, sweeps, kl: series[rng][i]})));
+  const ends = names.map((rng, i) => ({rng, sweeps: 1e8, kl: series[rng][10], dy: i === 0 ? -9 : i === 1 ? 9 : 0}));
+  const palette = {domain: names, range: ["#199e70", "#3987e5", "#c98500", "#e45756"]};
+  return Plot.plot({
+    width: 640,
+    height: 380,
+    marginRight: 188,
+    x: {type: "log", label: "Sweeps →", domain: [1e3, 1e8], ticks: [1e3, 1e4, 1e5, 1e6, 1e7, 1e8], tickFormat: "~s"},
+    y: {type: "log", label: "↑ KL divergence from exact (nats)", domain: [5e-8, 0.2], ticks: [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], tickFormat: d => d.toExponential(0), grid: true},
+    color: {legend: true, ...palette},
+    symbol: {domain: names, range: ["circle", "diamond", "square", "triangle"]},
+    marks: [
+      Plot.line(rows, {x: "sweeps", y: "kl", stroke: "rng", strokeWidth: 2}),
+      Plot.dot(rows, {x: "sweeps", y: "kl", fill: "rng", symbol: "rng", r: 4, tip: true, title: d => `${d.rng}\n${d.sweeps.toExponential(0)} sweeps\nKL ${d.kl.toExponential(2)}`}),
+      ...ends.map(e => Plot.text([e], {x: "sweeps", y: "kl", text: "rng", textAnchor: "start", dx: 8, dy: e.dy})),
+    ]
+  });
+}
+```
+
+That's a sharper split than I expected. Give each p-bit its own LFSR and read the full register on every update, and the error stops falling at 0.0138, whatever you do. Adjacent words are the same bits shifted by one, so each draw is largely decided by the last. That floor is about what 1,000 sweeps of a good generator gets you, so running for $10^8$ sweeps buys nothing further. Share one LFSR across the circuit, and the floor is 0.102, far worse.
+
+Now take the same LFSRs and step them 32 times between reads, so that no bit is reused. The error falls as $1/\text{sweeps}$ right down to where I stopped, $1.6 \times 10^{-7}$, indistinguishable from xoshiro in this test. So Singh's warning and Aadit's machine aren't in conflict, as far as a five-p-bit test can say. A 32-bit LFSR is perfectly adequate for this if you stop reusing its bits, and terrible if you don't. In hardware that needn't take 32 clocks, since an XOR network can jump several steps at once, though I haven't synthesised one or worked out what it would cost. I also don't know how the million-p-bit machine wires its registers, beyond the fact that it uses them and matches the GPU's exponent closely.
+
+It's a small test and I wouldn't lean on it for anything subtle. It also only covers sampling a fixed distribution. Singh and colleagues report LFSRs failing at learning, and they warn that the usual fix for whole-word reads, phase shifters that scramble the bits, adds complexity that limits scaling [@singh2024]. Still, for inference, it moves where I think the argument for physical noise sits: less on sample quality, which better wiring can improve, and more on cost. In the 2024 paper's estimates, in 7 nm, an LFSR p-bit is 5,150 transistors and 145 fJ per random bit, and a stochastic-junction one is about 4 transistors and 2 fJ [@singh2024]. That's a real gap, and it's about area and energy. It still has to survive those nanosecond junctions becoming a working process.
+
+## What this buys
+
+The benefit I can actually put numbers on is energy per flip. I've kept the provenance next to each number, because mixing these up is how bad comparisons happen.
+
+```{ojs}
+//| label: fig-energy
+//| fig-cap: "Energy per p-bit update, log scale. Shapes separate what was measured on hardware from what comes out of a simulation or projection, and the one number based on my own guess at the power draw. These are not like for like: graphs, precision and what counts as a flip all differ, and some exclude the host. The table below has the source and caveat for each."
+{
+  const measured = "measured on hardware", projected = "simulated or projected", guess = "my guess at the power";
+  const rows = [
+    {name: "6 FPGAs, 0.1 MHz (exact)", J: 32e-9, kind: measured},
+    {name: "Nvidia V100 (reported)", J: 21.99e-9, kind: measured},
+    {name: "One M2 core (my benchmark)", J: 16e-9, kind: guess},
+    {name: "Google TPU v3 (reported)", J: 7.77e-9, kind: measured},
+    {name: "18 FPGAs, 1 MHz, 1M p-bits", J: 1.5e-9, kind: measured},
+    {name: "6 FPGAs, 50 MHz (overclocked)", J: 65e-12, kind: measured},
+    {name: "1 FPGA, 3D spin glass", J: 50e-12, kind: measured},
+    {name: "7 nm digital, place and route", J: 294e-15, kind: projected},
+    {name: "Stochastic-junction chip", J: 20e-15, kind: projected},
+    {name: "Extropic Z1, per update", J: 7.09e-15, kind: projected},
+  ];
+  const fmt = J => J >= 1e-9 ? `${+(J * 1e9).toPrecision(3)} nJ` : J >= 1e-12 ? `${+(J * 1e12).toPrecision(3)} pJ` : `${+(J * 1e15).toPrecision(3)} fJ`;
+  return Plot.plot({
+    width: 640,
+    height: 350,
+    marginLeft: 196,
+    x: {type: "log", label: "Energy per update →", domain: [3e-15, 1e-7], ticks: [1e-14, 1e-13, 1e-12, 1e-11, 1e-10, 1e-9, 1e-8, 1e-7], tickFormat: fmt, grid: true},
+    y: {label: null, domain: rows.map(d => d.name)},
+    color: {legend: true, domain: [measured, projected, guess], range: ["#199e70", "#3987e5", "#c98500"]},
+    symbol: {domain: [measured, projected, guess], range: ["circle", "diamond", "triangle"]},
+    marks: [
+      Plot.ruleY(rows, {y: "name", stroke: "currentColor", strokeOpacity: 0.12}),
+      Plot.dot(rows, {x: "J", y: "name", fill: "kind", symbol: "kind", r: 5, tip: true, title: d => `${d.name}\n${fmt(d.J)}\n${d.kind}`}),
+    ]
+  });
+}
+```
+
+::: {.callout-note collapse="true" title="The numbers behind that chart"}
+| System | Energy per update | Where it comes from | Caveat |
+|---|---|---|---|
+| 6 FPGAs at 0.1 MHz | 29–35 nJ | 150–180 W ÷ 5.1×10⁹ flips/s [@aadit2026] | One power range is given across clocks, so this is my division |
+| Nvidia V100 | 21.99 nJ | As quoted in [@chowdhury2025] | Simpler graph |
+| One M2 core | ~16 nJ | My 3.1×10⁸ updates/s ÷ an **assumed 5 W** | I didn't measure the power |
+| Google TPU v3 | 7.77 nJ | As quoted in [@chowdhury2025] | Simpler graph |
+| 18 FPGAs at 1 MHz | 1.4–1.6 nJ | 1.4–1.6 kW ÷ 10¹² flips/s [@aadit2026] | Near the exact limit |
+| 6 FPGAs at 50 MHz | 59–71 pJ | 150–180 W ÷ 2.53×10¹² flips/s [@aadit2026] | Overclocked, so the sampling is inexact |
+| 1 FPGA | 50 pJ | 9.168 W at 185 flips/ns [@chowdhury2025] | Measured |
+| 7 nm digital | 294 fJ | 248 mW, 8,442 p-bits at 100 MHz [@aadit2026] | Place and route, not fabricated |
+| Stochastic-junction chip | 20 fJ | [@chowdhury2025] | Projected, assumes nanosecond junctions |
+| Extropic Z1 | 7.09 fJ | SPICE [@amico2026thermalizers] | Excludes reads, writes and the host |
+:::
+
+The first thing the chart shows is that a million-p-bit FPGA rig isn't where the energy story is. I ran a plain sequential Gibbs sweep on a 3D spin glass on one core of my M2 laptop, and got $3.1 \times 10^8$ updates per second. If that core draws 5 W, which is a guess and only that, it's 16 nJ per update, which is ten times *worse* than the 18-FPGA machine and about half of what the six-FPGA one uses at its conservative clock. FPGAs are a prototype for an ASIC, and the energy argument rests on the blue diamonds, none of which has been measured as a chip.
+
+This is also a good place to mention how these headline speedups get built. The "six orders of magnitude over a CPU" in the 2022 paper is against, in its own words, "an unoptimized serial MATLAB implementation", doing about $10^5$ flips a second [@aadit2022]. Its authors are clear that the comparison illustrates how the scaling behaves. My plain C code on one core beats that baseline by a factor of 3,000. Against that core, a six-FPGA rig running at its exact clock (5.1×10⁹ flips/s) is 16 times faster, and the million-p-bit machine is about 3,200 times faster. Those are still real, and a thousand cores aren't free, but they're different sentences from "a million times faster".
+
+The authors of the 2026 paper are careful in this respect too. They use the GPU as a reference "for the decay exponent $\kappa_f$, not as a runtime competitor" (that's the annealing exponent $\kappa$ from above), and they point out that those weights fit in a single modern GPU's L2 cache. So wall-clock on a GPU would be interesting, and the paper doesn't report it.
+
+So how could we actually benefit? This is my list, roughly in order of how much I believe it.
+
+Sparse, irregular sampling is the clearest case. If your problem graph has low degree but no lattice structure, parallel Gibbs in dedicated logic gets throughput that grows with size, and a GPU's vector units don't help much. Plenty of real problems look like that once compiled, including most of what my compiler, thermir, produces.
+
+A cheap random source per unit also changes the architecture. Digital designs can share their expensive generators across many p-bits, which risks the kind of correlated draws my experiment above punishes, though my shared run also reused bits, so it can't separate sharing from reuse. If each p-bit carries its own noise source for a few transistors, you can stop paying that tax and spend the area on more p-bits. This is the benefit that does need physics.
+
+The next is the one I find most underrated: tolerance of late data. Because an approximate update is still a usable update, $\eta$ gives you a dial for scaling across chips with slow links, and you can predict the result in software before building anything. Very few accelerator architectures can say that about their interconnect.
+
+Energy per sample comes after that, and I'd love to rank it first. Two orders of magnitude between the 7 nm digital estimate and the FPGAs is plausible, and another one or two for physical noise would be remarkable. But there are no silicon wall-power numbers yet, and my [roadblocks post](thermodynamic-roadblocks.qmd) has the bad news about reads and writes.
+
+Machine learning is the original motivation, and sampling really was what held Boltzmann machines back. People have trained deep Boltzmann machines on sparse p-bit hardware [@niazi2024], and Extropic's whole bet is on denoising models built from these samplers. I don't have a view of my own on whether those models will be competitive, and the evidence for it is thin, so I'll leave that one open.
+
+And the unexpected one: being a *classical baseline*. In 2025, Chowdhury and colleagues ran p-computer algorithms on the same 3D spin-glass instances used to argue for a quantum annealer's scaling advantage, and found "comparable, and in some cases more favorable" scaling, results they say "establish a rigorous classical baseline" [@chowdhury2025]. Most of their scaling runs were on CPUs and the hardware numbers were projected, so it's mainly an algorithm result. But a cheap, massively parallel classical sampler keeps quantum optimisation claims accountable, and I think that's worth having even if nobody buys a p-bit chip.
+
+## Factoring, and the result I had to throw away
+
+Now the experiment that embarrassed me. The clearest story people tell about p-bits is the one Aaronson went after: clamp a multiplier's output, let it relax, read the factors. I wanted to know how that behaves when you don't have a chip in the way. So I built an $n \times n$ array multiplier out of AND and full-adder penalties, clamped the product, and ran three samplers on it: Gibbs at a fixed $\beta$, simulated annealing with restarts, and parallel tempering with eight replicas. For each size I tuned $\beta$ and the restart length on separate instances, then ran 12 semiprimes five times each. Success meant the factor bits multiplied to $N$, and I checked after every sweep.
+
+The results looked great, in the sense of being simple. Annealing's mean sweep count hugged the curve for blind guessing, where you draw both factors at random and multiply: annealing's mean is 0.75 to 2 times blind from $n = 6$ to $n = 11$, and the growth rate is ×4.5 per factor bit against blind's ×4. I had a sentence ready: *one sweep of hundreds of p-bits is worth about one random guess*. It was neat and it suited my argument. I spent three hours on it, with up to six runs going at once, making my laptop very hot, before I looked at the tuned parameters properly.
+
+The tuner kept choosing absurdly long ramps. At $n = 11$ it picked a ramp to $\beta = 0.5$ over a million sweeps, and the median success came at 84,000 sweeps, when $\beta$ was about 0.04. That's close to infinite temperature. And at $\beta = 0$, every p-bit's input is zero, every sweep draws a fresh uniform sample of the factor bits, and my check-every-sweep logic is literally blind guessing, by construction. The tuner had worked out that the best way to score well on my metric was to switch the physics off. So I hadn't measured the sampler's power at all. I had measured a random number generator with a very expensive multiplier attached.
+
+The question I'd meant to ask was different: does the *cold* state at the end of an anneal hold the answer? Relaxing into a low-energy state is the entire pitch. So I added that test, reading the state once, at the end of the ramp, for final $\beta$ of 3 and 6 and ramps from 100 to 100,000 sweeps. A β = 0 control checked every sweep comes out at about 1× blind, as it must.
+
+```{ojs}
+//| label: fig-factor
+//| fig-cap: "Mean work to factor a semiprime, by size. Annealing checked every sweep tracks blind guessing because that's largely what it's doing. Reading only the cold state at the end of an anneal (the best setting found at each size) costs 33 to 75 times as much as blind guessing. Plain Gibbs falls away fast. Sizes stop where runs didn't finish: I stopped the sweep after three hours, with Gibbs at n=10 and tempering at n=11 still unfinished. Blind guessing counts guesses, trial division counts candidates, and the samplers count sweeps."
+{
+  const rows = [];
+  const add = (series, start, vals) => vals.forEach((v, i) => rows.push({series, n: start + i, cost: v}));
+  add("annealing, checked every sweep", 4, [10, 44, 126, 495, 2933, 6146, 53210, 261080]);
+  add("tempering, checked every sweep", 4, [14, 29, 179, 2315, 6674, 17791, 123969]);
+  add("Gibbs, checked every sweep", 4, [16, 55, 317, 1519, 42800, 343012]);
+  add("annealing, cold state only", 4, [480, 2400, 5280, 21600, 82080, 273200]);
+  const refs = [];
+  const addRef = (series, vals) => vals.forEach((v, i) => refs.push({series, n: 4 + i, cost: v}));
+  addRef("blind guessing", [8, 32, 128, 512, 2048, 8192, 32768, 131072]);
+  addRef("trial division", [5, 9, 21, 41, 83, 198, 350, 663]);
+  const names = ["annealing, checked every sweep", "annealing, cold state only", "tempering, checked every sweep", "Gibbs, checked every sweep"];
+  return Plot.plot({
+    width: 640,
+    height: 440,
+    marginRight: 104,
+    x: {label: "Bits per factor →", domain: [4, 11], ticks: d3.range(4, 12), tickFormat: "d"},
+    y: {type: "log", label: "↑ Sweeps (or candidates) to the answer", grid: true},
+    color: {legend: true, domain: names, range: ["#199e70", "#e45756", "#3987e5", "#c98500"]},
+    symbol: {domain: names, range: ["circle", "triangle", "diamond", "square"]},
+    marks: [
+      Plot.line(refs, {x: "n", y: "cost", z: "series", stroke: "currentColor", strokeWidth: 1.5, strokeDasharray: "4 3"}),
+      Plot.text(refs.filter(d => d.n === 11), {x: "n", y: "cost", text: "series", textAnchor: "start", dx: 6}),
+      Plot.line(rows, {x: "n", y: "cost", stroke: "series", strokeWidth: 2}),
+      Plot.dot(rows, {x: "n", y: "cost", fill: "series", symbol: "series", r: 4, tip: true, title: d => `${d.series}\n${d.n} bits per factor\n${d.cost.toLocaleString("en-GB")} sweeps`}),
+      Plot.text([{n: 7, cost: 21600, label: "annealing, cold state"}], {x: "n", y: "cost", text: "label", textAnchor: "end", dx: -8, dy: -10}),
+      Plot.text([{n: 8, cost: 42800, label: "Gibbs"}], {x: "n", y: "cost", text: "label", textAnchor: "start", dx: 10, dy: 4}),
+      Plot.text([{n: 10, cost: 123969, label: "tempering"}], {x: "n", y: "cost", text: "label", textAnchor: "end", dx: -10, dy: -6}),
+      Plot.text([{n: 11, cost: 261080, label: "annealing"}], {x: "n", y: "cost", text: "label", textAnchor: "end", dx: -10, dy: -4}),
+    ]
+  });
+}
+```
+
+The cold state costs 33 to 75 times what blind guessing costs, at every size from $n = 4$ to $n = 9$. So the sentence I nearly published was wrong, and wrong in the direction that flatters the hardware. The "as good as guessing" result was the sampler with its physics switched off. With the physics on, it's considerably worse than guessing.
+
+That doesn't mean the physics does nothing, and this is the part I found interesting. Annealing does concentrate probability on the answer. At $n = 9$ a random draw is right about one time in 8,192, and a 100,000-sweep ramp ended on the right factors in 1 of 24 anneals, a few hundred times better than chance (on very thin counts). It just isn't worth what it costs: in those same 100,000 sweeps, blind guessing would have found the answer about twelve times. At $n = 8$ with a final $\beta$ of 6, making the ramp a thousand times longer raised the success rate from 0.07% to 12.5%, about 170 times. So slower is better per anneal and worse per sweep. Five of the six best settings used the shortest ramp I tried, which means the sampler does best when it quenches and starts over. The growth of those best settings is about ×3.5 per factor bit, on 3 to 6 successes each, so I can't tell it apart from ×4.
+
+Why does the physics help so little here? Aadit and colleagues describe it well: they saw "a 'golf course' like energy landscape where the ground state is well-hidden from 'ordinary' approximate states that are easy to reach" [@aadit2022]. The energy counts violated gates, and it says nothing about how close your factors are to right. A state with the wrong factors and one broken gate has nearly the same energy as the answer, and a completely different set of factor bits. There's no slope to roll down, only a hole.
+
+To be fair to the published work: their sparsified circuit with 2,128 p-bits reliably reached the true ground state of 32-bit semiprimes, such as $4277546633 = 65479 \times 65327$, which is well past anything I ran, and my code has no sparsification, and no cluster moves or anything else clever. They also say, unprompted, that "factorization of 32-bit semiprimes is not difficult since even with trial division this is a relatively easy computation", and that "factorization with this method is not a practical approach in the context of cryptography". Theirs is a benchmark of a hard spin glass. It's the press around these results that keeps turning them into a threat to RSA.
+
+Wall-clock makes it plainer still. Unloaded, my sampler takes about a second per run at $n = 10$, and trial division takes well under a microsecond, close enough to my clock's resolution that I wouldn't quote it more finely. That's a factor of millions in favour of the method you learn at school, and it grows with size, since trial division doubles per factor bit and the sampler quadruples. A speedup of $10^4$ from hardware buys $\log_4 10^4 \approx 6.6$ extra factor bits, so about 13 bits of $N$. The million-p-bit machine's advantage over my naive code, about $3 \times 10^4$, buys maybe 7 factor bits, and that assumes you can fill it with thousands of copies of a multiplier that needs only a few hundred p-bits. That's what a constant factor against an exponential does, which was Aaronson's point in 2019, stated as a number.
+
+## What stops it
+
+P-bits are classical, and this doesn't go away with better devices. You can simulate one on a laptop with polynomial overhead per update, so any speedup is a constant factor in hardware, or an algorithm that a CPU can run too. There's a stronger way to say the same thing, which Feynman saw in 1981: Boltzmann weights are positive and quantum amplitudes aren't. Camsari, Chowdhury and Datta have shown that p-bits can emulate quantum systems, and the scope is right there in their title, which limits it to sign-problem-free Hamiltonians [@camsari2019sign]. "Poor man's q-bit" is a good way to get a magazine article, and it hides that distinction completely.
+
+Then there's getting data on and off, which [I've gone on about before](thermodynamic-roadblocks.qmd). Extropic's estimates put reading one p-bit off Z1 at 1.692 pJ, equal to about 240 updates, and rewriting one at 153.6 pJ, or about 21,700 [@amico2026thermalizers]. A chip that can flip for femtojoules but needs its results carried over a slow bus is a chip whose energy is set by its bus. In Extropic's language-model estimates for Z1T, the FPGA uses more than 95% of the energy [@extropic-z1t-post]. If your workload doesn't throw away nearly all of its samples, the femtojoule numbers above don't apply.
+
+Dense problems need embedding, turning one logical variable into chains of physical p-bits, and that eats the capacity and slows the mixing, which is what the [last post](how-many-sweeps.qmd) was about. And analog devices vary. Extropic's X0 reports about 5% calibration error [@verdon2026torx], and every p-bit in a chip is somewhat different, while an LFSR p-bit is exactly the p-bit you designed. This is an advantage for digital that I think gets underrated, along with being able to debug from a seed.
+
+There's a flip side to being classical, and it's a feature I care about a lot. Because you can simulate these things exactly, you can [unit test a sampler](unit-testing-a-sampler.qmd). You can prove bounds, plan runs and check a chip against the theory, in a way quantum hardware can't offer beyond a few dozen qubits. It's why a compiler for this stuff is even possible.
+
+::: {.callout-tip title="My take: it's the contract that matters"}
+I came into this expecting a story about exotic devices, and I'm leaving with a view that the important idea is an abstraction. A $\pm 1$ with mean $\tanh I$, available locally and cheaply, turns a sequential 1953 algorithm into something that scales with silicon. That's been shown at a million p-bits with nothing but digital logic. Physics enters only as a way of making that contract cheaper, and it hasn't yet shown it can at scale.
+
+So my questions for any new p-bit result are: how many p-bits, how fast, is the energy measured at the wall, including the host, and what's it compared against? And if the comparison is against a CPU, I'd want to see the CPU's code.
+:::
+
+## Limitations
+
+- **My experiments are small.** The LFSR test has five p-bits and one kind of LFSR, and says nothing about a million-p-bit machine's actual wiring. The AND gate test only confirms the textbook.
+- **The factoring experiment is naive on purpose, and incomplete.** It has no sparsification and no cluster moves, and a smarter sampler could do better by a large constant. I stopped the sweep after three hours, so Gibbs stops at $n = 9$, tempering at $n = 10$, annealing at $n = 11$, and $n = 12$ has nothing. Those are the slowest runs, so the fitted growth rates are, if anything, flattering. Tuning cost is excluded.
+- **The cold-read numbers are thin.** The best setting at each size rests on 3 to 6 successes, so each of those points could easily be off by a factor of two. The "best" cell at each size is picked after the fact, which flatters it, and the shortest ramp I tried was 100 sweeps, so it may not be the real optimum. Cold reads stop at $n = 9$.
+- **My energy figure for the M2 is a guess.** I assumed 5 W and didn't measure it. Its 3.1×10⁸ updates per second were measured, on a lattice with tight code, and my factoring code is about ten times slower per update.
+- **"Flips" aren't comparable across rows.** Different graphs, precisions and boundaries. Treat that chart as an order-of-magnitude picture, and read the table.
+- **I read the papers, not the raw data.** Hardware numbers are as reported, the energy-per-flip divisions are mine, and I couldn't check the supplementary timings for the 32-bit factoring runs.
+
+The result I'd most like to see is a p-bit chip with real physical noise, past $10^5$ p-bits, at nanosecond speed, with energy measured at the wall, host included. Nobody has reported all of those at once. Z1 is the nearest candidate I know of, and the FPGA rigs have set a rather high bar for what it has to beat, without any physics at all.

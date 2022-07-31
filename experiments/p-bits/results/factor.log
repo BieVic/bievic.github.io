@@ -1,0 +1,6 @@
+11: line 1: 34422 Terminated: 15          ./factor $0 $1 300000000 > results/factor/n$0_m$1.json
+12: line 1: 36778 Terminated: 15          ./factor $0 $1 300000000 > results/factor/n$0_m$1.json
+12: line 1: 35002 Terminated: 15          ./factor $0 $1 300000000 > results/factor/n$0_m$1.json
+11: line 1: 33805 Terminated: 15          ./factor $0 $1 300000000 > results/factor/n$0_m$1.json
+10: line 1: 33719 Terminated: 15          ./factor $0 $1 300000000 > results/factor/n$0_m$1.json
+12: line 1: 36626 Terminated: 15          ./factor $0 $1 300000000 > results/factor/n$0_m$1.json

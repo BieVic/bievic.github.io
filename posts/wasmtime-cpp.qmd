@@ -1,0 +1,244 @@
+---
+title: "Embedding Wasmtime in C++"
+date: 2023-07-04
+date-modified: 2026-10-10
+description: "A little guide on how to embed Wasmtime in your C++ project: calling WebAssembly from C++, calling C++ from WebAssembly, and passing C++ objects around with externref."
+categories: [webassembly, wasmtime, cpp]
+aliases:
+  - /posts/2023/07/04/wasmtime-cpp.html
+---
+
+This is a little guide on how to execute WebAssembly inside C++, and vice versa.
+First, we are going to embed [Wasmtime](https://wasmtime.dev/) in C++. This will allow us to call WebAssembly within any C++ project.
+Wasmtime is a fantastic standalone runtime for WebAssembly that comes equipped with its own compiler, called Cranelift.
+I might be a bit biased though, as I have contributed to Cranelift/Wasmtime. Nevertheless, give it a try, and if you have any questions, issues, etc.,
+join us on [Zulip](https://bytecodealliance.zulipchat.com/).
+
+Anyway, let's get back to work. Calling C++ functions from WebAssembly is a little bit more tricky.
+This will require us to register host functions in Wasmtime. Lastly, if we are interested in passing more complex data
+to WebAssembly (such as C++ pointers or classes), we can utilize WebAssembly's *externref* type.
+
+::: {.callout-note}
+The examples were last tested with **Wasmtime 49** and need C++17. The C++ API still changes between releases from time to time, so check the header that ships with your version if something doesn't compile.
+:::
+
+## Setup
+
+The C++ API is a single header, `wasmtime.hh`, that wraps Wasmtime's C API. It used to live in a separate [wasmtime-cpp](https://github.com/bytecodealliance/wasmtime-cpp) repository, but nowadays it ships with every Wasmtime release. Download the C API archive for your platform from the [releases page](https://github.com/bytecodealliance/wasmtime/releases) (e.g. `wasmtime-v49.0.2-aarch64-macos-c-api.tar.xz`) and unpack it. You get an `include/` directory with the headers and a `lib/` directory with the static and shared library.
+
+Compiling our program is then a single command:
+
+```sh
+# macOS
+clang++ -std=c++17 -I$WASMTIME/include main.cc $WASMTIME/lib/libwasmtime.a \
+    -framework CoreFoundation -framework Security -o main
+
+# Linux
+g++ -std=c++17 -I$WASMTIME/include main.cc $WASMTIME/lib/libwasmtime.a \
+    -lpthread -ldl -lm -o main
+```
+
+Throughout the examples I load the WebAssembly modules from disk with this little helper:
+
+```cpp
+#include <fstream>
+#include <sstream>
+#include <string>
+
+std::string readFile(const char *path) {
+  std::ifstream file(path);
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  return buffer.str();
+}
+```
+
+## Embedding WebAssembly
+
+Now, let's suppose we have a simple WebAssembly module called *wasm.wat* as follows:
+
+```wat
+(module
+  (func (export "execute"))
+)
+```
+
+This module contains one empty exported function that is correct, callable and yet does nothing. We now want to call this function
+from within our C++ project.
+
+```cpp
+#include <wasmtime.hh>
+
+using namespace wasmtime;
+
+int main() {
+  Engine engine;
+  Store store(engine);
+
+  auto module = Module::compile(engine, readFile("wasm.wat")).unwrap();
+  auto instance = Instance::create(store, module, {}).unwrap();
+  auto execute = std::get<Func>(*instance.get(store, "execute"));
+  execute.call(store, {}).unwrap();
+}
+```
+
+A quick tour of what is going on here:
+
+- The **`Engine`** holds the global configuration and the compiler. You usually need exactly one per process.
+- The **`Store`** owns all WebAssembly objects: instances, memories, functions. Everything a module does at runtime lives in a store, and it all gets freed when the store goes away.
+- **`Module::compile`** takes either the text format (`.wat`) or a binary (`.wasm`) and compiles it to native code with Cranelift. A module is stateless and can be instantiated many times.
+- **`Instance::create`** instantiates the module in our store. The empty `{}` is the list of imports, and our module has none.
+- **`instance.get`** looks up an export by name. It returns a `std::optional<Extern>`, where `Extern` is a `std::variant` over functions, globals, memories and tables, hence the `std::get<Func>`.
+
+Almost every call returns a `Result`, which is either the value or an error. `unwrap()` returns the value or aborts with the error message, which keeps the examples short. In real code you would check the result instead.
+
+### Typed functions
+
+`Func::call` takes and returns a `std::vector<Val>`, which is flexible but clumsy. If you know the signature up front, you can ask for a typed version of the function:
+
+```cpp
+auto run = std::get<Func>(*instance.get(store, "run"))
+               .typed<int32_t, int32_t>(store)
+               .unwrap();
+int32_t result = run.call(store, 20).unwrap();
+```
+
+`typed` checks the signature once, when you call it, so a mismatch shows up as an error right there, not as a crash later. Use `std::tuple<...>` for multiple parameters or results, and `std::monostate` for none.
+
+## Call C++ from WebAssembly
+
+WebAssembly modules can't do anything on their own. They can't print, open files or read the clock. Everything the outside world offers has to be *imported*, and the embedder (that's us) decides what gets passed in. In our case, these imports are plain C++ functions, called *host functions*.
+
+Here is a module that imports two functions from a module named `host`, one to print a number and one to print a string:
+
+```wat
+(module
+  (import "host" "print_i32" (func $print_i32 (param i32)))
+  (import "host" "print_str" (func $print_str (param i32 i32)))
+
+  (memory (export "memory") 1)
+  (data (i32.const 0) "Hello from WebAssembly!")
+
+  (func (export "run") (param $x i32) (result i32)
+    (call $print_str (i32.const 0) (i32.const 23))
+    (call $print_i32 (local.get $x))
+    (i32.mul (local.get $x) (i32.const 2))
+  )
+)
+```
+
+To provide the imports, we use a `Linker`. It maps `(module, name)` pairs to definitions, and `func_wrap` turns any C++ callable into a WebAssembly function. Wasmtime derives the WebAssembly signature from the C++ parameter and return types, so a lambda taking an `int32_t` becomes a function with signature `(param i32)`.
+
+```cpp
+int main() {
+  Engine engine;
+  Store store(engine);
+  Linker linker(engine);
+
+  linker.func_wrap("host", "print_i32", [](int32_t value) {
+    std::cout << "wasm says: " << value << "\n";
+  }).unwrap();
+
+  linker.func_wrap("host", "print_str",
+                   [](Caller caller, int32_t ptr, int32_t len) {
+    auto memory = std::get<Memory>(*caller.get_export("memory"));
+    auto data = memory.data(caller);
+    std::cout << std::string_view(
+        reinterpret_cast<const char *>(data.data() + ptr), len) << "\n";
+  }).unwrap();
+
+  auto module = Module::compile(engine, readFile("host.wat")).unwrap();
+  auto instance = linker.instantiate(store, module).unwrap();
+  auto run = std::get<Func>(*instance.get(store, "run"))
+                 .typed<int32_t, int32_t>(store)
+                 .unwrap();
+
+  int32_t result = run.call(store, 20).unwrap();
+  std::cout << "result: " << result << "\n";
+}
+```
+
+Running it prints:
+
+```
+Hello from WebAssembly!
+wasm says: 20
+result: 40
+```
+
+Two things are worth pointing out.
+
+**Strings don't cross the boundary.** WebAssembly only knows numbers, so the module passes a pointer and a length into its own linear memory. That's why `print_str` takes a `Caller` as its first parameter. The `Caller` gives the host function access to the calling instance, so it can look up the exported `memory` and read the bytes. Note that `memory.data()` hands out a view into the instance's memory. Don't hold on to it across calls back into WebAssembly, since the memory may grow and move.
+
+**Instantiate through the linker.** Instead of `Instance::create` with an explicit import list, we call `linker.instantiate`, which resolves every import by name. If an import is missing or has the wrong type, you get a readable error at this point instead of a trap later.
+
+## Externref for complex data
+
+Passing numbers is easy, and passing strings through linear memory is manageable. But what if a host function needs a C++ object, say a database connection or a counter? We can't copy it into the module's memory, and handing out a raw pointer as an `i32` would let the module forge pointers into our address space.
+
+This is what `externref` is for. It is an opaque reference to a host value. WebAssembly can store it, pass it around and hand it back to the host, but it can't look inside or fake one.
+
+Here is a module that takes an `externref` and passes it back to the host twice:
+
+```wat
+(module
+  (import "host" "increment" (func $increment (param externref)))
+
+  (func (export "bump_twice") (param $counter externref)
+    (call $increment (local.get $counter))
+    (call $increment (local.get $counter))
+  )
+)
+```
+
+On the C++ side, an `ExternRef` wraps a `std::any`, so it can hold any copyable C++ value. In this example it holds a pointer to a `Counter` that lives on our stack:
+
+```cpp
+struct Counter {
+  std::string name;
+  int value = 0;
+};
+
+int main() {
+  Engine engine;
+  Store store(engine);
+  Linker linker(engine);
+
+  linker.func_wrap("host", "increment",
+                   [](Caller caller, std::optional<ExternRef> ref) {
+    if (!ref) {
+      return;
+    }
+    auto *counter = std::any_cast<Counter *>(ref->data(caller));
+    counter->value++;
+  }).unwrap();
+
+  auto module = Module::compile(engine, readFile("externref.wat")).unwrap();
+  auto instance = linker.instantiate(store, module).unwrap();
+  auto bump = std::get<Func>(*instance.get(store, "bump_twice"))
+                  .typed<std::optional<ExternRef>, std::monostate>(store)
+                  .unwrap();
+
+  Counter counter{"requests"};
+  ExternRef ref(store, &counter);
+  bump.call(store, ref).unwrap();
+
+  std::cout << counter.name << " = " << counter.value << "\n";  // requests = 2
+}
+```
+
+A few details:
+
+- An `externref` can be null, so on the C++ side it shows up as `std::optional<ExternRef>`. Always handle the empty case, because the module is free to pass `ref.null extern`.
+- `ExternRef` values are garbage-collected by the store. Creating one needs the store, and so does reading it back with `data()`. Inside a host function, the `Caller` stands in for the store.
+- The reference holds whatever you put into the `std::any`, here a raw pointer. Wasmtime keeps the `std::any` alive, but not the object the pointer points to. If the module might keep the reference around (e.g. in a global or a table), make sure the object outlives it, or store a `std::shared_ptr` instead.
+
+## Wrapping up
+
+That covers the three building blocks of embedding Wasmtime in C++:
+
+1. **Compile and instantiate** a module, then call its exports, ideally through typed functions.
+2. **Provide host functions** with a `Linker`, and use the `Caller` to reach into the instance's memory.
+3. **Pass C++ objects** into WebAssembly safely as opaque `externref`s.
+
+From here, the natural next steps are [WASI](https://wasi.dev/), which gives modules a standard interface to files, clocks and the environment, and the [component model](https://component-model.bytecodealliance.org/), which replaces the pointer-and-length dance with real strings, records and lists. Both are covered in the [Wasmtime documentation](https://docs.wasmtime.dev/).

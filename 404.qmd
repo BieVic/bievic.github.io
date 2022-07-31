@@ -1,0 +1,6 @@
+---
+title: "Page not found"
+toc: false
+---
+
+The page you requested doesn't exist. Head back to the [blog](/index.qmd).

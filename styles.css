@@ -1,0 +1,5 @@
+/* Slightly larger, airier body text for long-form posts. */
+main.content {
+  font-size: 1.05rem;
+  line-height: 1.7;
+}

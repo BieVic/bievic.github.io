@@ -1,0 +1,56 @@
+/*-- scss:defaults --*/
+// "thermir" palette, light mode: warm cream paper, ink navy, burnt orange + cobalt.
+// Layered on top of cosmo; only colours change.
+
+$ink:         #1B2230;
+$ink-deep:    #141A26;
+$cream:       #F6F3EC;
+$cream-card:  #FDFBF6;
+$cream-line:  #E2DCCF;
+$cream-tint:  #F1E3D8;
+$slate:       #4A5262;
+$orange:      #E4572E;
+$orange-text: #B4441F;   // orange that holds 4.5:1 on cream
+$blue:        #2B6CB0;
+$on-ink:      #EDE9E0;
+$on-ink-hl:   #F27A50;
+
+$primary:     $orange-text;
+$secondary:   $slate;
+$info:        $blue;
+$success:     $blue;
+$warning:     $orange;
+$danger:      $orange-text;
+$light:       $cream-card;
+$dark:        $ink-deep;
+
+$body-bg:     $cream;
+$body-color:  $ink;
+$headings-color: $ink;
+$text-muted:  $slate;
+$link-color:  $orange-text;
+$border-color: $cream-line;
+$hr-border-color: $cream-line;
+$table-border-color: $cream-line;
+
+$navbar-bg:   $ink-deep;
+$navbar-fg:   $on-ink;
+$navbar-hl:   $on-ink-hl;
+$footer-bg:   $cream;
+$footer-fg:   $slate;
+
+$code-color:          $blue;
+$code-bg:             $cream-card;
+$code-block-bg:       $cream-card;
+$code-block-border-left: $orange;
+
+$callout-color-note:      $blue;
+$callout-color-tip:       $orange;
+$callout-color-important: $orange-text;
+$callout-color-caution:   $orange;
+$callout-color-warning:   $orange-text;
+
+$toc-color:   $orange-text;
+
+/*-- scss:rules --*/
+::selection { background: $cream-tint; }
