@@ -1,0 +1,229 @@
+---
+title: "Unit-testing a sampler"
+date: 2026-10-19
+draft: false
+description: "Thermodynamic computers return samples, not answers. How do you test that a sampler is correct? I built a small test harness on top of Extropic's THRML, caught a known miscompilation, showed how naive tests cry wolf, and tried computing error certificates at compile time."
+categories: [compilers, thermodynamic-computing, testing]
+bibliography: thermodynamic-compilers.bib
+echo: false
+---
+
+In [Compiling for thermodynamic computers](2026-10-16-compiling-thermodynamic-computers.qmd) I listed the tools this field is missing, and statistical testing was near the top: "You can't unit-test a sampler with `assert_eq`." This time I'm not summarising other people's work. I built a small test harness, ran it against real samplers, and measured what works and what doesn't.
+
+The setup is deliberately small: Ising models on a ring of 8 spins, sampled with [THRML](https://github.com/extropic-ai/thrml), Extropic's open-source simulator for its thermodynamic hardware. With 8 spins there are only $2^8 = 256$ states, so I can compute every distribution and every transition matrix *exactly* and know the right answer. That's what makes it possible to test the tests. All code and the raw results are in the blog's repository under `experiments/testing-samplers/`; one script reproduces every number in this post in about ten seconds.
+
+## Why samplers break unit tests
+
+A sampler can be wrong in three ways, and each one needs a different check:
+
+1. **It samples the wrong distribution.** The output looks like plausible samples; they're just drawn from something else. This is what a miscompilation looks like on thermodynamic hardware.
+2. **It's correct, but its samples are correlated.** Consecutive samples of a Markov chain aren't independent. A test that assumes they are becomes overconfident and rejects correct samplers.
+3. **It never mixes.** The chain gets stuck in one region of the state space and never visits the rest. Every individual sample is a valid state, so nothing looks broken.
+
+THRML uses the energy convention
+
+$$
+E(s) = -\beta\Big(\sum_i h_i s_i + \sum_{(i,j)} J_{ij}\, s_i s_j\Big), \qquad \pi(s) \propto e^{-E(s)},
+$$
+
+with spins $s_i \in \{-1, +1\}$, biases $h_i$, couplings $J_{ij}$ and inverse temperature $\beta$. My main test model ("model A") is a ring with couplings drawn from $\mathcal{N}(0, 1)$, biases from $\mathcal{N}(0, 0.5^2)$ and $\beta = 1.5$. THRML samples it with chromatic Gibbs sampling: all even sites in parallel, then all odd sites, exactly as Z1 would.
+
+## Check 1: an exact test catches a miscompilation
+
+The Torx paper describes a subtle bug: lowering an Ising model to one two-spin gate per edge. Each gate correctly samples its own two-spin energy, and the edge energies add up to the full energy, but the composition samples the wrong distribution [@verdon2026torx]. I implemented my own version of this lowering, with biases split evenly over the edges touching each site, and computed its stationary distribution exactly.
+
+**The test.** If you can enumerate the target distribution $\pi$, the strongest check is to compare the empirical distribution of the samples with $\pi$ directly. I use the total-variation distance between the two as the test statistic, and obtain its null distribution by drawing the same number of samples from $\pi$ itself, 2,000 times. That gives an exact Monte Carlo test with no asymptotic approximations. Because this test needs *independent* samples, I take the final state of 4,000 independent chains, each run for 200 sweeps.
+
+| Sampler | TV to target | 95% of null | p-value | Verdict |
+|---|---|---|---|---|
+| THRML chromatic Gibbs | 0.031 | 0.040 | 0.54 | pass |
+| Edge-by-edge lowering | 0.567 | 0.040 | < 0.001 | **fail** |
+
+The p-value of the edge-by-edge sampler is the smallest the test can report with 2,000 null draws, so "< 0.001" is a floor, not an estimate.
+
+Is this a bug, or just a too-coarse discretisation? The gates evolve each edge for a time step $\Delta t$, and Trotter errors shrink with $\Delta t$. The error doesn't:
+
+| Time step $\Delta t$ | 1.0 | 0.5 | 0.1 | 0.02 |
+|---|---|---|---|---|
+| TV of the stationary distribution to the target | 0.604 | 0.576 | 0.546 | 0.542 |
+
+It converges to about 0.54, not to zero. The composition itself is wrong, which matches the Torx explanation: each two-spin gate gives a site a flip rate that depends on one neighbour at a time, and a sum of sigmoids is not the sigmoid of a sum.
+
+Why call this subtle when the error is so large? Look at what the wrong sampler produces:
+
+```{ojs}
+//| label: fig-magnetisation
+//| fig-cap: "Mean spin (magnetisation) per site under the exact distribution and under the edge-by-edge sampler, both computed exactly. The wrong sampler gets every sign right and looks like a more weakly coupled version of the right answer."
+{
+  const exact = [-0.922, -0.77, -0.368, -0.32, -0.876, 0.058, -0.936, -0.942];
+  const edgewise = [-0.358, -0.433, -0.153, -0.093, -0.638, -0.01, -0.347, -0.366];
+  const data = exact.flatMap((v, i) => [
+    {site: `${i}`, sampler: "exact", m: v},
+    {site: `${i}`, sampler: "edge-by-edge", m: edgewise[i]},
+  ]);
+  return Plot.plot({
+    width: 640,
+    fx: {label: "Site"},
+    x: {axis: null, domain: ["exact", "edge-by-edge"]},
+    y: {label: "↑ Mean spin", domain: [-1, 0.2], grid: true},
+    color: {legend: true, domain: ["exact", "edge-by-edge"], range: ["#00bc8c", "#e45756"]},
+    marks: [
+      Plot.barY(data, {fx: "site", x: "sampler", y: "m", fill: "sampler"}),
+      Plot.ruleY([0]),
+    ]
+  });
+}
+```
+
+Nothing about this output screams "bug": no NaNs, no impossible states, every site leaning the right way. If the only check were "does it look reasonable", it would pass. The exact test flags it immediately. The catch is that the exact test only works when you can enumerate the target, which limits it to small models or small pieces of a program.
+
+## Check 2: at scale, naive tests cry wolf
+
+For a model too large to enumerate, you test *expectations* instead: compare the sampler's estimate of some quantity, say the mean energy, against a reference value. The textbook z-test computes the standard error as $\sigma/\sqrt{n}$. That's only valid for independent samples. Consecutive samples of a Markov chain are correlated, so a chain of $n$ samples carries the information of fewer, $n_\text{eff}$, independent ones. The naive test then underestimates its error and becomes overconfident.
+
+The fix I use is batch means: split the chain into $B = 20$ consecutive batches, compute the mean of each, and estimate the standard error from the spread of the batch means. If batches are long compared to the correlation time, the batch means are nearly independent. The same estimate gives the effective sample size, $n_\text{eff} = \operatorname{Var}(x)/\text{SE}^2$.
+
+To measure how the two tests behave, I ran a correct sampler, THRML, 500 times, with 2,000 samples per run, and tested the mean energy against its exact value at a nominal false-alarm rate of 5%. Two models: model A from above, and a more strongly correlated ferromagnetic ring (model B: all $J = 1$, $h = 0.1$, $\beta = 1$).
+
+```{ojs}
+//| label: fig-false-alarms
+//| fig-cap: "How often a test rejects a correct sampler (500 runs of 2,000 samples each, testing the mean energy at α = 5%). The naive test assumes independent samples; the batch-means test accounts for autocorrelation. Dashed line: the nominal 5%."
+{
+  const data = [
+    {row: "Model A · naive", test: "naive", rate: 0.304},
+    {row: "Model A · batch means", test: "batch means", rate: 0.068},
+    {row: "Model B · naive", test: "naive", rate: 0.472},
+    {row: "Model B · batch means", test: "batch means", rate: 0.046},
+  ];
+  return Plot.plot({
+    width: 640,
+    marginLeft: 150,
+    marginRight: 50,
+    x: {label: "False-alarm rate →", domain: [0, 0.5], tickFormat: "%", grid: true},
+    y: {label: null, domain: data.map(d => d.row), padding: 0.25},
+    color: {legend: true, domain: ["naive", "batch means"], range: ["#e45756", "#00bc8c"]},
+    marks: [
+      Plot.barX(data, {x: "rate", y: "row", fill: "test"}),
+      Plot.text(data, {x: "rate", y: "row", text: d => `${(d.rate * 100).toFixed(1)}%`, dx: 6, textAnchor: "start"}),
+      Plot.ruleX([0.05], {strokeDasharray: "4,4", stroke: "currentColor"}),
+      Plot.text([0.05], {x: d => d, frameAnchor: "top", text: () => "nominal 5%", dx: 4, dy: -2, textAnchor: "start"}),
+    ]
+  });
+}
+```
+
+The naive test rejects a correct sampler in 30% of runs on model A and 47% on model B, instead of 5%. Both chains had effective sample sizes far below 2,000 (a median of 655 and 300), and the more correlated the chain, the worse the naive test gets. The batch-means test stays close to the nominal rate: 6.8% and 4.6%. It's slightly above 5% on model A, because batch means with 20 batches is itself an approximation.
+
+A test that never complains is useless, so I also checked the other direction: the batch-means test rejected the edge-by-edge sampler from check 1 in all 100 runs.
+
+In practice, a test suite with a 30–47% false-alarm rate gets switched off. Accounting for autocorrelation is what makes the tests usable at all.
+
+## Check 3: a stuck chain looks perfectly healthy
+
+The third failure mode is the hardest to spot. Take a ferromagnetic ring without biases (all $J = 1$, $h = 0$). By symmetry the state "all up" is exactly as likely as "all down", so the exact mean spin is 0. At low temperature, though, a Gibbs sampler has to flip all spins through high-energy intermediate states to get from one to the other. That's the mixing–expressivity trade-off from the [roadblocks post](2026-10-11-thermodynamic-roadblocks.qmd).
+
+The standard diagnostic is R-hat: run several chains from *different* starting points and compare the spread within each chain to the spread between chains. If the chains have mixed, they agree and R-hat is close to 1. I ran 8 THRML chains, four started all up and four all down, for 2,000 samples each:
+
+| | $\beta = 2.0$ | $\beta = 2.5$ |
+|---|---|---|
+| Mean spin per chain (exact: 0) | from −0.84 to +0.99 | exactly +1 (4 chains), exactly −1 (4 chains) |
+| R-hat on energy | 1.001 | 1.000 |
+| R-hat on mean spin | **1.34** | **156** |
+
+At $\beta = 2.5$ the chains are completely frozen: none of them ever leaves its starting state's valley. And yet R-hat on the energy says everything is fine, because both valleys have exactly the same energy. Energy is the quantity the sampler is built around and the first thing one would monitor. Only the magnetisation, the observable that distinguishes the two modes, reveals the problem.
+
+The lesson for tooling: a mixing diagnostic is only as good as the observables it watches. A compiler has an advantage here: it knows the structure of the model, including its symmetries, and could choose those observables automatically instead of leaving it to the programmer.
+
+## A slice of certification: bounds at compile time
+
+Tests check a sampler after the fact. In the compiler post I argued for something stronger: error budgets computed at compile time, i.e. certificates that a compiled program stays within some distance of its target. What follows is a first experiment in that direction.
+
+As the "compiler", I use the simplest approximation the hardware forces on you: coupling caps. Z1's couplings have a finite range $|J| \le J_\text{max}$ [@amico2026thermalizers], so every coupling of model A gets clipped to $[-J_\text{max}, J_\text{max}]$. Everything else stays the same. This is a stand-in, not a model of Thermalizers' actual compilation. To keep the sampler mixing fast enough for the bounds to be meaningful, I use $\beta = 0.5$ here; the largest coupling is $|J| = 1.30$.
+
+**The bound.** Let $P$ be the exact sweep, $\tilde P$ the compiled one, and $\pi$, $\tilde\pi$ their stationary distributions. Because $\pi = \pi P$ and $\tilde\pi = \tilde\pi \tilde P$,
+
+$$
+\tilde\pi - \pi = (\tilde\pi - \pi) P + \tilde\pi(\tilde P - P)
+\quad\Longrightarrow\quad
+\lVert \tilde\pi - \pi \rVert_\text{TV} \le \frac{\eta}{1-\rho},
+$$
+
+where $\eta = \sup_x \lVert \tilde P(x,\cdot) - P(x,\cdot) \rVert_\text{TV}$ is the worst-case error of one compiled sweep and $\rho$ is the Dobrushin contraction coefficient of the exact sweep (here $\rho = 0.725$). This is the same perturbation argument the Thermalizers paper uses for its depth-independent error floor [@amico2026thermalizers]. The question is how cheaply you can compute $\eta$, and how tight the result is. I compared three certificates:
+
+- **Local:** bound $\eta$ by the sum of the worst-case errors of the individual site updates. Each one only depends on a site and its two neighbours, so this is computable from local information alone, which is what a compiler could do for arbitrarily large models.
+- **Exact, 1 sweep:** compute $\eta$ exactly from the full $256 \times 256$ transition matrices.
+- **Exact, 2 sweeps:** use two sweeps as one macro-step, which contracts more strongly ($\rho$ shrinks) at the price of more computation.
+
+```{ojs}
+//| label: fig-certificates
+//| fig-cap: "Stationary error of the coupling-capped sampler (measured exactly) against three compile-time certificates, for different coupling caps J_max (β = 0.5). Bounds are capped at 1, the largest possible TV distance; a bound of 1 says nothing."
+{
+  const rows = [
+    {jmax: 0.4, measured: 0.210, local: 1.0, exact1: 1.0, exact2: 0.323},
+    {jmax: 0.6, measured: 0.149, local: 1.0, exact1: 0.778, exact2: 0.234},
+    {jmax: 0.8, measured: 0.091, local: 0.926, exact1: 0.532, exact2: 0.149},
+    {jmax: 1.0, measured: 0.051, local: 0.549, exact1: 0.298, exact2: 0.088},
+    {jmax: 1.2, measured: 0.016, local: 0.188, exact1: 0.103, exact2: 0.031},
+  ];
+  const series = [
+    ["measured", "measured error"],
+    ["local", "certificate: local"],
+    ["exact1", "certificate: exact, 1 sweep"],
+    ["exact2", "certificate: exact, 2 sweeps"],
+  ];
+  const data = series.flatMap(([k, label]) => rows.map(r => ({jmax: r.jmax, value: r[k], kind: label})));
+  return Plot.plot({
+    width: 640,
+    x: {label: "Coupling cap J_max →", grid: true},
+    y: {type: "log", label: "↑ TV distance to the target", domain: [0.01, 1], grid: true},
+    color: {legend: true, domain: series.map(s => s[1]), range: ["currentColor", "#e45756", "#f2a541", "#00bc8c"]},
+    marks: [
+      Plot.line(data, {x: "jmax", y: "value", stroke: "kind", strokeWidth: 2.5}),
+      Plot.dot(data, {x: "jmax", y: "value", fill: "kind", r: 3.5}),
+    ]
+  });
+}
+```
+
+Three observations:
+
+1. **Every certificate is valid.** No bound ever falls below the measured error. The math promises it, but it's reassuring to see it hold on an exactly computed example.
+2. **The cheap certificate is loose.** The local bound is about 10 times the true error at mild caps, and at aggressive caps ($J_\text{max} \le 0.6$) it's vacuous: a TV bound of 1 says nothing.
+3. **Precision costs computation.** Each step up in computation tightens the bound: at $J_\text{max} = 1.0$, from 0.55 (local) to 0.30 (exact) to 0.088 (two sweeps), against a true error of 0.051. It's the same trade-off as in static analysis, where more precise analyses cost more.
+
+The hard part at scale is $\rho$, not $\eta$. I computed the contraction coefficient exactly from the full transition matrix, which is impossible for a real model with thousands of spins. A local error bound is easy; a local *contraction* bound is the open problem. Without one, a compiler can certify per-kernel errors but not where they settle in a long-running sampler.
+
+## What a sampler test suite needs
+
+Putting the three checks together, this is what I'd want from a test framework for thermodynamic programs:
+
+| Check | Catches | Needs | Watch out for |
+|---|---|---|---|
+| Exact distribution test | Wrong distribution (miscompilation) | Enumerable target; independent samples | Only works for small models or small kernels |
+| Expectation test with batch means | Wrong expectations at scale | A trusted reference value | Naive (iid) tests: 30–47% false alarms here |
+| Multi-chain R-hat | Chains that never mix | Diverse starting states; the right observables | Watching only the energy can miss frozen chains |
+| Certificates | Compilation error, before running | Kernel-level error bounds; a contraction bound | Cheap bounds can be loose or vacuous |
+
+In code, the harness from this post makes each check a short test function. For example, the miscompilation test from check 1:
+
+```python
+def test_thrml_matches_exact_distribution():
+    pi = MODEL_A.exact()  # enumerate all 2^8 states
+    samples = thrml_runner.run(MODEL_A, jax.random.key(1), n_chains=4000, n_warmup=200, n_samples=1)
+    result = exact_distribution_test(to_index(samples[:, -1, :]), pi, np.random.default_rng(0))
+    assert result["p_value"] > 0.01, f"TV {result['tv']:.3f} to the target"
+```
+
+## Limitations
+
+This is a small, controlled study, and the results should be read that way:
+
+- **Tiny models.** Eight spins make everything exactly computable, which is the point, but larger models will mix differently. The false-alarm rates depend on how correlated the chain is.
+- **Simulation only.** THRML is a software simulator. Real hardware adds calibration error and drift, which this harness doesn't model.
+- **My lowering, not Torx's.** I implemented the edge-by-edge lowering myself, so my error of 0.54–0.60 isn't comparable to the 0.402 Torx reports for its construction.
+- **Batch means is an approximation.** Its false-alarm rate was 4.6–6.8% instead of exactly 5%. More careful estimators exist; the point here is the difference between accounting for correlation and not.
+- **Coupling caps are a stand-in.** Real variational compilation introduces different errors than simply clipping couplings.
+
+## Where this leads
+
+The three checks are simple, but together they cover the three ways a sampler can fail, and two of them (independence-aware tests and observable-aware mixing diagnostics) are easy to get wrong in a way that makes testing useless. The certificate experiment points to the more interesting research question for compilers: a cheap, local bound on how fast a compiled sampler contracts. With that, error budgets could become a routine part of compiling for thermodynamic hardware, instead of something you measure after the fact.

@@ -1,0 +1,374 @@
+---
+title: "Loop unrolling, or: what this site is named after"
+date: 2026-10-22
+draft: false
+description: "From emptying a dishwasher to the machine code of an Apple M2 to thermodynamic computers: everything you never wanted to know about loop unrolling, with real measurements."
+categories: [compilers, performance, fun, thermodynamic-computing]
+bibliography: thermodynamic-compilers.bib
+echo: false
+---
+
+This blog is called *loop-unroller*. <!-- TODO: add your own reason for the name here --> Time to explain what a loop unroller actually does: from the kitchen to the machine code of an Apple M2, and finally to thermodynamic computers.
+
+## The dishwasher problem
+
+Every repetitive task is a loop. A knitting pattern says "*K2, P2; repeat from * 10 times*", sheet music has repeat signs, and emptying a dishwasher means carrying plate after plate to the cupboard. Each repetition has some work (moving a plate) and some bookkeeping (walking over, opening the cupboard, asking "am I done yet?").
+
+**Unrolling** means carrying four plates per trip instead of one: the same work, a quarter of the bookkeeping. Three details of this little scene turn out to be the whole theory of loop unrolling:
+
+1. **Leftovers.** Ten plates in stacks of four leaves two over. Every unrolled loop needs a plan for the remainder.
+2. **Finite arms.** Carry twenty plates and you drop them. A CPU has a fixed number of *registers*, and unrolling too far runs out of them.
+3. **Longer instructions.** "Carry four plates" is more to remember than "carry one plate". Unrolled code is bigger.
+
+Try it: pick how many plates you carry per trip (the *unroll factor*) and how many plates there are.
+
+```{ojs}
+viewof k = Inputs.range([1, 8], {value: 4, step: 1, label: "Plates per trip (unroll factor)"})
+```
+
+```{ojs}
+viewof n = Inputs.range([1, 30], {value: 10, step: 1, label: "Plates in the dishwasher"})
+```
+
+```{ojs}
+//| label: fig-trips
+//| fig-cap: "Each row is one trip to the cupboard. Full trips carry k plates (the unrolled loop body); leftover plates are handled one by one at the end (the remainder loop)."
+{
+  const full = Math.floor(n / k), rest = n % k;
+  const cells = [];
+  for (let t = 0; t < full; t++) for (let j = 0; j < k; j++) cells.push({trip: `trip ${t + 1}`, slot: j + 1, kind: "unrolled trip"});
+  for (let j = 0; j < rest; j++) cells.push({trip: `leftover ${j + 1}`, slot: 1, kind: "leftover plate"});
+  const trips = full + rest;
+  return Plot.plot({
+    width: 640,
+    height: Math.max(90, 26 * trips + 50),
+    marginLeft: 80,
+    x: {label: null, domain: d3.range(1, 9), tickFormat: d => `plate ${d}`, axis: "top"},
+    y: {label: null, domain: cells.map(d => d.trip).filter((v, i, a) => a.indexOf(v) === i)},
+    color: {legend: true, domain: ["unrolled trip", "leftover plate"], range: ["#00bc8c", "#f2a541"]},
+    marks: [
+      Plot.cell(cells, {x: "slot", y: "trip", fill: "kind", inset: 2, rx: 4}),
+    ],
+    caption: `${trips} trips instead of ${n}, so ${trips} times "am I done yet?" instead of ${n}.`
+  });
+}
+```
+
+## What a loop costs a CPU
+
+Back to the computer. The most boring function imaginable adds up an array of integers:
+
+```c
+long sum_ints(const int *a, long n) {
+    long s = 0;
+    for (long i = 0; i < n; i++)
+        s += a[i];
+    return s;
+}
+```
+
+Compiled for an Apple M2 with clang 23 at `-O2`, but with unrolling and vectorisation switched off, the heart of the loop is four instructions:
+
+```asm
+LBB0_2:
+    ldrsw   x9, [x0], #4     ; load a[i], advance the pointer   <- work
+    add     x8, x8, x9       ; s += a[i]                        <- work
+    subs    x1, x1, #1       ; one element fewer to go          <- bookkeeping
+    b.ne    LBB0_2           ; not done yet? go round again     <- bookkeeping
+```
+
+Half of the instructions do the job; the other half is walking to the cupboard. Unrolling by four keeps the two "work" lines four times and the two bookkeeping lines once:
+
+```c
+long sum_ints_unrolled(const int *a, long n) {
+    long s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    long i = 0;
+    for (; i + 3 < n; i += 4) {       // full trips: four plates at a time
+        s0 += a[i];
+        s1 += a[i + 1];
+        s2 += a[i + 2];
+        s3 += a[i + 3];
+    }
+    for (; i < n; i++)                // the leftovers, one by one
+        s0 += a[i];
+    return (s0 + s1) + (s2 + s3);
+}
+```
+
+Notice the second loop: that's the plan for leftover plates. Also notice the four separate sums `s0` to `s3`. They're deliberate, and they turn out to be the most important part of the whole trick (more on that below).
+
+## Duff's device: unrolling's most infamous moment
+
+The remainder loop is a bit inelegant. In 1983, Tom Duff, then at Lucasfilm, needed a fast loop to copy data to an output device and found a way to get rid of it, by abusing C in a way that still makes people wince:
+
+```c
+send(to, from, count)
+register short *to, *from;
+register count;
+{
+    register n = (count + 7) / 8;
+    switch (count % 8) {
+    case 0: do { *to = *from++;
+    case 7:      *to = *from++;
+    case 6:      *to = *from++;
+    case 5:      *to = *from++;
+    case 4:      *to = *from++;
+    case 3:      *to = *from++;
+    case 2:      *to = *from++;
+    case 1:      *to = *from++;
+            } while (--n > 0);
+    }
+}
+```
+
+Yes, that's a `switch` whose `case` labels jump into the *middle* of a `do`-`while` loop, and yes, that's legal C. The loop body is unrolled eight times. The `switch` handles the leftovers by jumping into the body at just the right point for the first trip, so that every later trip is a full one. (`to` isn't incremented because it pointed at a hardware output register.)
+
+Duff himself described his feelings about it as "a combination of pride and revulsion". On whether it argued for or against C's fall-through `switch` semantics, he wrote: "This code forms some sort of argument in that debate, but I'm not sure whether it's for or against."
+
+Please don't write this today. Your compiler will do something better, as we'll see shortly.
+
+## The real reason: parallelism, not bookkeeping
+
+On a modern CPU like the M2, though, the bookkeeping instructions are cheap. The chip runs several instructions per clock cycle and predicts the loop branch almost perfectly. So why does unrolling still matter?
+
+Because of those separate sums. Look at the simple loop again: `s += a[i]`. Every addition needs the result of the previous one. Back in the kitchen, it's as if each plate had to be stacked on the previous one before the next could be picked up. It doesn't matter how many hands the kitchen has; it's one long chain.
+
+With four separate sums, there are four independent chains, and the CPU can work on all of them at the same time. To measure this, I summed 4,096 `double`s (small enough to sit in the L1 cache, so memory isn't the bottleneck) with one, two, four and eight accumulators, on an M2, compiled with clang 23 at `-O2`, taking the best of seven runs:
+
+```{ojs}
+//| label: fig-accumulators
+//| fig-cap: "Time per element for summing doubles with 1, 2, 4 and 8 independent accumulators (Apple M2, clang 23.1.4, -O2, 4,096 elements, best of 7 runs of 20,000 repetitions). Every doubling of independent chains halves the time."
+{
+  const data = [
+    {acc: "1 accumulator", ns: 0.830},
+    {acc: "2 accumulators", ns: 0.400},
+    {acc: "4 accumulators", ns: 0.200},
+    {acc: "8 accumulators", ns: 0.104},
+  ];
+  return Plot.plot({
+    width: 640,
+    marginLeft: 120,
+    marginRight: 60,
+    x: {label: "Nanoseconds per element →", domain: [0, 0.9], grid: true},
+    y: {label: null, domain: data.map(d => d.acc)},
+    marks: [
+      Plot.barX(data, {x: "ns", y: "acc", fill: "#00bc8c"}),
+      Plot.text(data, {x: "ns", y: "acc", text: d => `${d.ns.toFixed(3)} ns`, dx: 6, textAnchor: "start"}),
+      Plot.ruleX([0]),
+    ]
+  });
+}
+```
+
+Every doubling of the number of accumulators halves the time: eight accumulators are eight times faster than one. With a single accumulator, each element costs 0.83 ns: about three clock cycles, if the core was running near the M2's top speed of roughly 3.5 GHz. That's what you'd expect if each addition has to wait for the one before it to finish.
+
+### Why doesn't the compiler just do this?
+
+For integers, it does. This is what clang makes of the boring integer loop when it's allowed to unroll (but not yet to use vector instructions). Note the four different accumulator registers, `x13`, `x8`, `x11` and `x12`:
+
+```asm
+LBB0_5:
+    ldpsw   x16, x17, [x15, #-8]   ; load two ints
+    add     x13, x13, x16          ; chain 1
+    add     x8, x8, x17            ; chain 2
+    ldpsw   x16, x17, [x15], #16   ; load two more
+    add     x11, x11, x16          ; chain 3
+    add     x12, x12, x17          ; chain 4
+    sub     x10, x10, #4           ; bookkeeping, once per four elements
+    cmp     x14, x10
+    b.ne    LBB0_5
+```
+
+For `double`s, it doesn't, even though it happily unrolls the loop eight times. All eight additions go into the same register, `d0`, one after the other:
+
+```asm
+    fadd    d0, d0, d1
+    fadd    d0, d0, d3
+    fadd    d0, d0, d2
+    ...
+```
+
+The reason: floating-point addition isn't associative. $(a + b) + c$ and $a + (b + c)$ can round differently, and splitting a sum into four chains changes the order of the additions. A compiler may only transform your program in ways that don't change its results, so it keeps the original order. Only if you explicitly allow it with `-ffast-math` does clang reorder the sum. Then it vectorises and splits the chains itself, and even the one-accumulator version gets down to 0.11 ns per element. With `-ffast-math`, hand-unrolling stopped paying off cleanly in my measurements: the compiler's own version was just as good.
+
+## Nothing is free: what unrolling costs
+
+So far unrolling sounds like magic. Remember the three dishwasher details, though. Below is the integer sum again, this time with the size of the machine code next to the speed:
+
+| clang `-O2` with... | Time per element | Code size of `sum_ints` |
+|---|---|---|
+| no unrolling, no vectorisation | 0.288 ns | 48 bytes |
+| unrolling (4 chains), no vectorisation | 0.127 ns | 160 bytes |
+| unrolling and vectorisation (the default) | 0.054 ns | 300 bytes |
+
+Five times faster, six times bigger. In this tiny function, nobody cares about 252 extra bytes. Across a whole program, though, all that extra code competes for the CPU's instruction cache, and code that doesn't fit in it gets slow in a way no benchmark of a single loop will show you. That's the "longer instructions" problem from the kitchen.
+
+The other two dishwasher problems show up as well:
+
+- **Finite arms.** Each independent chain needs its own register. How far you can push this is worth its own section; see below.
+- **Leftovers.** Every unrolled loop needs remainder handling. In the default build above, clang generates a 16-elements-per-trip main loop, a 4-elements-per-trip loop for medium leftovers, and a one-at-a-time loop for the rest. That's where the 300 bytes come from.
+
+This is why compilers use heuristics instead of unrolling everything. GCC doesn't even enable `-funroll-loops` at `-O2` or `-O3` by default. If you know better than the heuristics, you can tell the compiler directly:
+
+```c
+#pragma clang loop unroll_count(4)   // clang
+#pragma GCC unroll 4                 // GCC
+for (long i = 0; i < n; i++) ...
+```
+
+GPU programmers know the CUDA spelling, `#pragma unroll`, which is everywhere in hand-tuned kernels.
+
+## Running out of arms
+
+If eight accumulators are eight times faster than one, why not use sixty-four? I extended the benchmark to 16, 32 and 64 independent accumulators, and looked at the machine code clang generated for each:
+
+```{ojs}
+//| label: fig-registers
+//| fig-cap: "Time per element for summing doubles with up to 64 independent accumulators (Apple M2, clang 23.1.4, -O2, best of 7 runs). The gains stop at 16–32 accumulators; at 64 the compiler runs out of registers and the loop gets slower again."
+{
+  const data = [
+    {k: 1, ns: 0.834}, {k: 2, ns: 0.402}, {k: 4, ns: 0.204}, {k: 8, ns: 0.102},
+    {k: 16, ns: 0.055}, {k: 32, ns: 0.052}, {k: 64, ns: 0.088},
+  ];
+  return Plot.plot({
+    width: 640,
+    marginRight: 50,
+    x: {type: "log", base: 2, label: "Independent accumulators →", ticks: data.map(d => d.k), tickFormat: d => `${d}`, grid: true},
+    y: {type: "log", label: "↑ Nanoseconds per element", domain: [0.04, 1], grid: true},
+    marks: [
+      Plot.line(data, {x: "k", y: "ns", stroke: "#00bc8c", strokeWidth: 2.5}),
+      Plot.dot(data, {x: "k", y: "ns", fill: d => d.k === 64 ? "#e45756" : "#00bc8c", r: 5}),
+      Plot.text(data, {x: "k", y: "ns", text: d => `${d.ns.toFixed(3)}`, dy: -12}),
+    ]
+  });
+}
+```
+
+| Accumulators | Main loop | Values spilled to memory in the loop | Time per element |
+|---|---|---|---|
+| 8 | 9 instructions | none | 0.102 ns |
+| 16 | 15 instructions | none | 0.055 ns |
+| 32 | 28 instructions | none | 0.052 ns |
+| 64 | 114 instructions | **8 loads and stores** (126 in the whole function) | 0.088 ns |
+
+Two things happen along the way. First, independent accumulators are exactly what vector instructions need, so clang quietly packs them two `double`s per 128-bit register. Second, the M2's CPU (like every 64-bit ARM core) has 32 of those vector registers. Thirty-two accumulators fit in 16 of them, with room left for the incoming data. Sixty-four accumulators need all 32 registers just for the sums, leaving nothing for loading the array. So the compiler starts parking values on the stack and fetching them back, and helpfully labels the code for us:
+
+```asm
+    str     q1, [sp, #32]     ; 16-byte Spill
+    ldr     q2, [sp]          ; 16-byte Reload
+    str     q2, [sp]          ; 16-byte Spill
+```
+
+That's the "carry twenty plates and drop them" moment, in machine code: the 64-way loop is four times as long as the 32-way one and 70% slower.
+
+## Watching the compiler decide
+
+You rarely need to unroll by hand, because the compiler already does it, guided by a cost model that weighs the size of the unrolled code against the expected benefit. clang will even tell you what it decided. Compile with `-Rpass=loop-unroll` and it reports every unrolling decision. I fed it three small loops:
+
+```c
+long sum_dynamic(const int *a, long n) {   // trip count only known at run time
+    long s = 0;
+    for (long i = 0; i < n; i++) s += a[i];
+    return s;
+}
+
+long sum_fixed(const int *a) {             // trip count known at compile time
+    long s = 0;
+    for (int i = 0; i < 8; i++) s += a[i];
+    return s;
+}
+
+long sum_pragma(const int *a, long n) {    // the programmer insists
+    long s = 0;
+#pragma clang loop vectorize(disable) unroll_count(4)
+    for (long i = 0; i < n; i++) s += a[i];
+    return s;
+}
+```
+
+With vectorisation switched off (`-fno-vectorize`), clang reports:
+
+```
+remarks.c:10:5: remark: completely unrolled loop with 8 iterations [-Rpass=loop-unroll]
+remarks.c:4:5: remark: unrolled loop by a factor of 4 with run-time trip count [-Rpass=loop-unroll]
+remarks.c:17:5: remark: unrolled loop by a factor of 4 with run-time trip count [-Rpass=loop-unroll]
+```
+
+The fixed-size loop disappears entirely. That's *full* unrolling: with only eight iterations, there's no reason to keep a loop at all. What's left of `sum_fixed` is seven instructions with no branch in sight:
+
+```asm
+_sum_fixed:
+    ldp     q0, q1, [x0]          ; load all eight ints at once
+    saddl2.2d v2, v0, v1
+    saddl.2d  v0, v0, v1
+    add.2d  v0, v0, v2
+    addp.2d d0, v0
+    fmov    x0, d0
+    ret
+```
+
+The run-time loops get *partial* unrolling by four plus a remainder loop, since the compiler can't know in advance how many plates there will be.
+
+The third loop held a surprise. I asked for an unroll factor of four and explicitly *disabled* vectorisation, and the generated code still used vector instructions. The culprit is a second, independent optimisation: the *SLP vectoriser*, which looks for identical operations sitting side by side in straight-line code. With `-Rpass=slp-vectorizer`, clang admits it: `remark: Vectorized horizontal reduction` on exactly that loop. Unrolling put four copies of `s += a[i]` next to each other, and the SLP vectoriser packed them together. `vectorize(disable)` only switched off the *loop* vectoriser, and with `-fno-slp-vectorize` the loop stays scalar. That's unrolling's main job in a modern compiler: it rarely speeds things up by itself, but it lays the work out so that other optimisations can find it.
+
+## Unrolling a thermodynamic computer
+
+In the last few posts I've been writing about [thermodynamic computers](2026-10-16-compiling-thermodynamic-computers.qmd): chips that compute by letting physical noise drive a sampler. They have no instruction pointer and no branch instruction, so do they have loops at all? They do, and the unrolling trade-offs come back in a surprisingly direct form.
+
+### Where the loops are
+
+There are two kinds of loops in a thermodynamic program.
+
+**The sampler itself is a loop.** A Gibbs sampler repeats one sweep over all spins again and again. On Extropic's Z1 that inner loop runs entirely in hardware: the chip "executes chromatic Gibbs sweeps without FPGA mediation, communicating only $h_i$ and $J_{ij}$ between sweeps" [@verdon2026torx]. That loop is already as unrolled as it gets: every spin has its own circuit, and a whole half-sweep happens in parallel.
+
+**Programs have loops around the sampler.** A Torx circuit for a random walk repeats one layer of gates $N$ times. Extropic's market simulator applies "the same kernel, with the same parameters" day after day [@amico2026thermalizers]. A diffusion or flow model on Normal's CN101 integrates over $N$ steps, each a full pass through the network. The CN101 paper puts it in exactly these terms: "A network of L layers unrolled over N steps is a nested computation L × N layers deep" [@holdijk2026cn101].
+
+### Unrolling in space
+
+On a CPU, unrolling copies a loop body in *the program*. On a thermodynamic chip, the natural equivalent is copying it in *space*: give every iteration its own region of the chip, so that the whole unrolled program sits on the hardware at once.
+
+CN101 shows the trade-off very concretely. Its CIFAR-10 flow model runs 10 integration steps through a 10-layer network, 100 layers in total. The chip "does not give each of those layers its own tile". Instead, "the ten weight matrices are pinned one to a tile across the six CN101 chips", and reused at every step: "This reuse bounds throughput, but it does not serialise the relaxation" [@holdijk2026cn101]. In loop terms, the layers are fully unrolled across tiles, but the time loop over integration steps stays *rolled*, because unrolling it would need ten times as many tiles.
+
+Every one of the three dishwasher details has a thermodynamic twin:
+
+- **Longer instructions → more chip area.** An unrolled CPU loop costs instruction-cache space; an unrolled thermodynamic program costs p-bits and tiles. That budget is tight. In the Thermalizers paper's Gaussian-process example, an eight-bit embedding needs about 14,000 p-bits, so that the whole 250,000-p-bit Z1 fits only a grid of about 32 × 32 to 48 × 48 cells [@amico2026thermalizers].
+- **Bookkeeping → round trips to the host.** If an iteration doesn't fit on the chip, it has to be swapped in: read out the state, load new couplings, continue. On Z1, reading a p-bit costs "about as much energy as $10^2$–$10^3$ Gibbs iterations", re-flashing couplings is "significantly more expensive", and the chip is efficient only "as long as coupling re-flashing is infrequent (no more than about once per second)" [@amico2026thermalizers]. Unrolling a program onto the chip saves exactly those round trips, just as unrolling a CPU loop saves branches.
+- **Leftovers → whatever doesn't fit.** A program longer than the chip has to be cut into chunks that fit, with a host round trip between them. That's partial unrolling with a remainder, and the "trip" is now a full readout and re-flash.
+
+### Multiple accumulators are multiple chains
+
+The most important part of the CPU trick wasn't saving bookkeeping. It was breaking one long dependency chain into several independent ones. Thermodynamic samplers have the same problem: consecutive samples of a Markov chain depend on each other, which is why a chain of $n$ samples is worth fewer than $n$ independent ones (I measured this in [Unit-testing a sampler](2026-10-19-unit-testing-a-sampler.qmd)).
+
+The fix is the same as on the CPU: run several independent chains and combine them at the end. CN101 calls this *parallel sample aggregation*: $K$ replicas running in parallel give "a combined estimator whose variance is K times smaller than a single replica of the same wall-clock duration, with no inter-replica coordination beyond a final averaging step" [@holdijk2026cn101]. That's the eight-accumulator loop, in hardware. And just like the accumulators, it's limited by space: every extra chain needs its own p-bits or tiles.
+
+CN101 even has an equivalent of *software pipelining*. With "sequential parallelism", downstream layers don't wait for upstream ones to finish; every stage updates from the still-converging estimate of the stage before it, "in the manner of a Jacobi-style fixed-point iteration over the whole unrolled chain". For the CIFAR-10 model, that reaches the same image quality in "some 62× fewer" cycles than running the layers one after the other [@holdijk2026cn101].
+
+::: {.callout-tip title="My take: what a thermodynamic unroller would decide"}
+Put together, a thermodynamic compiler faces an unrolling decision that's richer than on a CPU:
+
+| CPU loop unrolling | Thermodynamic equivalent |
+|---|---|
+| Copy the loop body in the program | Copy a kernel or layer across chip area |
+| Instruction-cache pressure | p-bit and tile budget |
+| Branch and counter overhead | Host round trips: readout, re-flash, re-clamp |
+| Register pressure | Embedding chains and coupling capacity |
+| Remainder loop | Chunks that don't fit, swapped in via the host |
+| Multiple accumulators | Multiple independent chains |
+| Software pipelining | CN101's sequential parallelism |
+
+There's one genuinely new dimension: specialisation. In a rolled loop, every iteration uses the same compiled kernel ("weight sharing" in Thermalizers' terms: factors that recur "may share one set of parameters" [@amico2026thermalizers]). Once unrolled into separate copies, each copy could be compiled for the inputs it actually sees at its position in the program. Thermalizers' context matching does exactly that kind of per-position re-optimisation. On a CPU, the closest relatives are loop peeling and versioning. On a thermodynamic chip, it would trade chip area for accuracy, not just for speed.
+:::
+
+## The extended family
+
+Loop unrolling rarely travels alone. Its relatives show up in every optimising compiler:
+
+- **Full unrolling.** If the trip count is small and known, say a 4×4 matrix multiply, the loop disappears entirely. No bookkeeping at all, just straight-line code.
+- **Vectorisation.** The default integer build above uses SIMD instructions that add several numbers in one go. Unrolling and vectorisation work hand in hand: the compiler first has to see several iterations side by side before it can pack them into one vector instruction.
+- **Unroll-and-jam.** For nested loops: unroll the *outer* loop and fuse (jam) the resulting copies of the inner loop together, so that values loaded once get reused several times.
+- **Software pipelining.** Instead of copying whole iterations, overlap them: start loading the data for iteration $i+1$ while still adding up iteration $i$. That's a dishwasher with a conveyor belt.
+
+## So, why "loop-unroller"?
+
+A loop unroller takes something repetitive, lays it out flat, and in doing so discovers that much of the work can happen at the same time. That's not a bad description of what I like doing: taking something that looks like one long sequential chain and finding the parallelism hidden inside it. And it sounds a lot friendlier than "register-allocator".
+
+All the benchmark code from this post is in the blog's repository under `experiments/loop-unrolling/`, if you want to try it on your own machine. Results on a different CPU will differ, which is half the fun.

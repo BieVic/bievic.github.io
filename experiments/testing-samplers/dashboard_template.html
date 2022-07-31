@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Testing Samplers</title>
+<style>
+  :root {
+    --bg: #fafaf8; --fg: #1d1d1f; --muted: #6b6b70; --card: #ffffff; --border: #e3e3e0;
+    --good: #0f9d74; --bad: #d64545; --warn: #d08a1c; --accent: #3a6fd8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141416; --fg: #ececee; --muted: #9a9aa2; --card: #1d1d21; --border: #2f2f35;
+      --good: #2fc497; --bad: #f06a6a; --warn: #f2b24c; --accent: #7aa2ff;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141416; --fg: #ececee; --muted: #9a9aa2; --card: #1d1d21; --border: #2f2f35;
+    --good: #2fc497; --bad: #f06a6a; --warn: #f2b24c; --accent: #7aa2ff;
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 0 0 20px; }
+  .card p { color: var(--muted); margin: 4px 0 14px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 0 0 20px; }
+  .kpi { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .kpi .v { font-size: 24px; font-weight: 650; }
+  .kpi .l { color: var(--muted); font-size: 13px; }
+  .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .box { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--bg); }
+  .box code { font-weight: 600; }
+  .box div { color: var(--muted); font-size: 12.5px; }
+  .arrow { color: var(--muted); }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 0 0 10px; }
+  .seg button { background: none; border: 0; color: var(--fg); padding: 6px 12px; cursor: pointer; font: inherit; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .chart { overflow-x: auto; }
+  .chart svg { max-width: 100%; height: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Testing samplers</h1>
+  <p class="sub">What the code in <code>experiments/testing-samplers/</code> does, and what it found. 8-spin Ising rings (256 states, all computed exactly), sampled with THRML.</p>
+
+  <div class="kpis" id="kpis"></div>
+
+  <section class="card">
+    <h2>How the pieces fit together</h2>
+    <p>Exact ground truth comes from enumerating all states; the real sampler is THRML; the harness compares the two.</p>
+    <div class="flow">
+      <div class="box"><code>models.py</code><div>exact π, exact transition matrices, edge-by-edge lowering</div></div>
+      <span class="arrow">+</span>
+      <div class="box"><code>thrml_runner.py</code><div>THRML chromatic Gibbs, many chains</div></div>
+      <span class="arrow">→</span>
+      <div class="box"><code>harness.py</code><div>exact test · naive / batch-means test · R-hat</div></div>
+      <span class="arrow">→</span>
+      <div class="box"><code>run_all.py</code> · <code>test_samplers.py</code><div>results.json · pytest</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Check 1 · Three distributions over all 256 states</h2>
+    <p>States sorted by their exact probability. THRML's empirical frequencies (4,000 independent chains) follow the exact curve; the edge-by-edge lowering puts its mass in the wrong places.</p>
+    <div class="seg" id="distToggle"><button data-k="thrml" class="on">THRML</button><button data-k="edgewise">Edge-by-edge</button><button data-k="both">Both</button></div>
+    <div class="chart" id="dist"></div>
+  </section>
+
+  <section class="card">
+    <h2>Check 2 · p-values on a correct sampler</h2>
+    <p>500 runs of THRML, each testing the mean energy against its exact value. For a correct sampler, p-values should be uniform (dashed line). The naive test piles up near 0, i.e. false alarms; batch means stays roughly flat.</p>
+    <div class="seg" id="pvToggle"><button data-k="A" class="on">Model A</button><button data-k="B">Model B (more correlated)</button></div>
+    <div class="chart" id="pvalues"></div>
+    <p style="margin-top:14px">Why: consecutive energy samples are correlated. The naive test treats 2,000 correlated samples as 2,000 independent ones.</p>
+    <div class="chart" id="acf"></div>
+  </section>
+
+  <section class="card">
+    <h2>Check 3 · Frozen chains</h2>
+    <p>Mean spin of 8 chains on a cold ferromagnet (exact answer: 0), four started all up, four all down. R-hat on energy cannot see the problem; R-hat on magnetisation can.</p>
+    <div class="seg" id="trToggle"><button data-k="2.0" class="on">β = 2.0</button><button data-k="2.5">β = 2.5</button></div>
+    <div class="chart" id="traces"></div>
+  </section>
+
+  <section class="card">
+    <h2>Certificates · bounds vs. measured error</h2>
+    <p>Coupling-capped sampler at β = 0.5. Every certificate stays above the true error; cheap local ones are loose, costlier exact ones tighter. A bound of 1 says nothing.</p>
+    <div class="chart" id="cert"></div>
+    <table id="certTable"></table>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.16/dist/plot.umd.min.js"></script>
+<script>
+const DATA = /*DATA*/null;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const W = () => Math.min(920, document.querySelector("main").clientWidth - 42);
+
+function kpis() {
+  const s = DATA.summary;
+  const items = [
+    ["THRML exact test", `p = ${s.exp1.p_value.toFixed(2)}`, "good", "passes"],
+    ["Edge-by-edge exact test", `TV ${s.exp1.edgewise.tv.toFixed(2)}`, "bad", "fails (p < 0.001)"],
+    ["Naive test false alarms", `${(s.exp2.A.reject_naive * 100).toFixed(0)}–${(s.exp2.B.reject_naive * 100).toFixed(0)}%`, "bad", "should be 5%"],
+    ["Batch-means false alarms", `${(s.exp2.B.reject_batch * 100).toFixed(1)}–${(s.exp2.A.reject_batch * 100).toFixed(1)}%`, "good", "close to 5%"],
+    ["R-hat magnetisation (β 2.5)", DATA.traces["2.5"].rhat_magnetisation.toFixed(0), "bad", `energy: ${DATA.traces["2.5"].rhat_energy.toFixed(2)}`],
+  ];
+  document.getElementById("kpis").innerHTML = items.map(([l, v, c, n]) =>
+    `<div class="kpi"><div class="l">${l}</div><div class="v ${c}">${v}</div><div class="l">${n}</div></div>`).join("");
+}
+
+function seg(id, onChange) {
+  const el = document.getElementById(id);
+  el.addEventListener("click", e => {
+    if (!e.target.dataset.k) return;
+    el.querySelectorAll("button").forEach(b => b.classList.toggle("on", b === e.target));
+    onChange(e.target.dataset.k);
+  });
+  return el.querySelector("button.on").dataset.k;
+}
+
+function mount(id, node) { const el = document.getElementById(id); el.replaceChildren(node); }
+
+function drawDist(k) {
+  const d = DATA.dist;
+  const marks = [Plot.line(d, {x: "rank", y: "exact", stroke: css("--fg"), strokeWidth: 2})];
+  if (k !== "edgewise") marks.push(Plot.dot(d, {x: "rank", y: d => Math.max(d.thrml, 1e-5), fill: css("--good"), r: 2.5, title: d => `state ${d.state}\nexact ${d.exact.toFixed(4)}\nTHRML ${d.thrml.toFixed(4)}`}));
+  if (k !== "thrml") marks.push(Plot.dot(d, {x: "rank", y: d => Math.max(d.edgewise, 1e-5), fill: css("--bad"), r: 2.5, title: d => `state ${d.state}\nexact ${d.exact.toFixed(4)}\nedge-by-edge ${d.edgewise.toFixed(4)}`}));
+  mount("dist", Plot.plot({
+    width: W(), height: 320, style: {background: "transparent", color: css("--fg")},
+    x: {label: "States, most to least likely →"},
+    y: {type: "log", label: "↑ Probability", domain: [1e-5, 1], grid: true},
+    color: {legend: true, domain: ["exact", "THRML (empirical)", "edge-by-edge (exact stationary)"], range: [css("--fg"), css("--good"), css("--bad")]},
+    marks,
+  }));
+}
+
+function drawP(k) {
+  const pv = DATA.pvalues[k];
+  const rows = ["naive", "batch"].flatMap(t => pv[t].map(p => ({test: t === "naive" ? "naive (iid)" : "batch means", p})));
+  mount("pvalues", Plot.plot({
+    width: W(), height: 260, style: {background: "transparent", color: css("--fg")},
+    fx: {label: null},
+    x: {label: "p-value →", domain: [0, 1]},
+    y: {label: "↑ Runs", grid: true},
+    color: {domain: ["naive (iid)", "batch means"], range: [css("--bad"), css("--good")]},
+    marks: [
+      Plot.rectY(rows, Plot.binX({y: "count"}, {x: "p", fx: "test", fill: "test", thresholds: d3.range(0, 1.0001, 0.05), inset: 1})),
+      Plot.ruleY([500 / 20], {stroke: css("--muted"), strokeDasharray: "4,4"}),
+    ],
+  }));
+  const acf = DATA.acf[k].map((v, lag) => ({lag, v}));
+  mount("acf", Plot.plot({
+    width: W(), height: 200, style: {background: "transparent", color: css("--fg")},
+    x: {label: "Lag (sweeps) →"}, y: {label: "↑ Autocorrelation of energy", domain: [0, 1], grid: true},
+    marks: [Plot.ruleY([0]), Plot.lineY(acf, {x: "lag", y: "v", stroke: css("--accent"), strokeWidth: 2}), Plot.dot(acf, {x: "lag", y: "v", fill: css("--accent"), r: 2.5})],
+  }));
+}
+
+function drawTraces(k) {
+  const t = DATA.traces[k];
+  const rows = t.chains.flatMap((c, i) => c.map((m, j) => ({chain: `chain ${i + 1} (${i < 4 ? "up" : "down"})`, start: i < 4 ? "up" : "down", t: j * 4, m})));
+  mount("traces", Plot.plot({
+    width: W(), height: 300, style: {background: "transparent", color: css("--fg")},
+    x: {label: "Sweep →"}, y: {label: "↑ Mean spin", domain: [-1.05, 1.05], grid: true},
+    color: {legend: true, domain: ["up", "down"], range: [css("--accent"), css("--warn")], label: "Start"},
+    marks: [
+      Plot.ruleY([0], {stroke: css("--muted"), strokeDasharray: "4,4"}),
+      Plot.line(rows, {x: "t", y: "m", z: "chain", stroke: "start", strokeOpacity: 0.75}),
+      Plot.text([`R-hat energy ${t.rhat_energy.toFixed(3)} · R-hat magnetisation ${t.rhat_magnetisation.toFixed(2)}`], {frameAnchor: "top-right", dy: 4, fill: css("--fg")}),
+    ],
+  }));
+}
+
+function drawCert() {
+  const rows = DATA.cert.rows;
+  const series = [["measured", "measured error", css("--fg")], ["bound_local", "local certificate", css("--bad")], ["bound_exact_1", "exact, 1 sweep", css("--warn")], ["bound_exact_2", "exact, 2 sweeps", css("--good")]];
+  const d = series.flatMap(([k, label]) => rows.map(r => ({jmax: r.jmax, v: r[k], kind: label})));
+  mount("cert", Plot.plot({
+    width: W(), height: 300, style: {background: "transparent", color: css("--fg")},
+    x: {label: "Coupling cap J_max →", grid: true}, y: {type: "log", label: "↑ TV distance", domain: [0.01, 1], grid: true},
+    color: {legend: true, domain: series.map(s => s[1]), range: series.map(s => s[2])},
+    marks: [Plot.line(d, {x: "jmax", y: "v", stroke: "kind", strokeWidth: 2.5}), Plot.dot(d, {x: "jmax", y: "v", fill: "kind", r: 3.5})],
+  }));
+  document.getElementById("certTable").innerHTML =
+    "<tr><th>J_max</th><th>measured</th><th>local</th><th>exact, 1 sweep</th><th>exact, 2 sweeps</th></tr>" +
+    rows.map(r => `<tr><td>${r.jmax}</td>${["measured", "bound_local", "bound_exact_1", "bound_exact_2"].map(k => `<td>${r[k] >= 1 ? "1 (vacuous)" : r[k].toFixed(3)}</td>`).join("")}</tr>`).join("");
+}
+
+let distK, pK, trK;
+function drawAll() { drawDist(distK); drawP(pK); drawTraces(trK); drawCert(); }
+kpis();
+distK = seg("distToggle", k => { distK = k; drawDist(k); });
+pK = seg("pvToggle", k => { pK = k; drawP(k); });
+trK = seg("trToggle", k => { trK = k; drawTraces(k); });
+drawAll();
+window.addEventListener("resize", () => { clearTimeout(window._r); window._r = setTimeout(drawAll, 150); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+</script>
+</body>
+</html>

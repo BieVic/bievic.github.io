@@ -1,0 +1,186 @@
+---
+title: "What's still standing between us and thermodynamic computers"
+date: 2026-10-11
+draft: false
+description: "The concrete hardware and software roadblocks thermodynamic processors face today, what's being done about them, and why the software side looks a lot like a compiler problem."
+categories: [hardware, thermodynamic-computing, compilers]
+bibliography: thermodynamic-roadblocks.bib
+echo: false
+---
+
+In my [primer](2026-10-09-thermodynamic-processors-primer.qmd) I described what thermodynamic processors promise: let physical noise do the sampling that AI workloads spend so much energy simulating. The primer ended with a list of caveats. This post takes those caveats seriously and asks a more specific question: what exactly is in the way, and what is being done about it?
+
+To keep this honest, everything below comes from what the two leading companies have published themselves, mostly three papers from August 2026: Extropic's Torx [@verdon2026torx] and Thermalizers [@amico2026thermalizers] papers, and Normal Computing's CN101 paper [@holdijk2026cn101]. Where they report simulations or projections rather than measurements, I say so.
+
+I'll split the answer into hardware and software. The hardware problems are hard but familiar. The software problems are, to a surprising degree, *compiler* problems. I dig into that part in a [follow-up deep dive](2026-10-16-compiling-thermodynamic-computers.qmd).
+
+## Two different machines
+
+"Thermodynamic computing" currently covers two quite different designs:
+
+- **Extropic Z1** samples from energy-based models. It has 269,568 p-bits on eight cores, each p-bit "directly connected to sixteen of its neighbors", with a sampling rate of over 50 MHz at under 1 W [@extropic-onebillion]. It combines in-memory analog multiply-accumulate circuits with "thermal-noise-driven pBIT sampling" [@amico2026thermalizers]. Z1 has taped out, and Extropic plans early access to Z1 cards, sticks and clusters in 2027 [@extropic-onebillion].
+- **Normal Computing CN101** computes functions as the *time-average* of a stochastic process that settles into equilibrium. It is a digital chip with four tiles, each a 64 × 64 stochastic matrix multiplier with 64 neurons, running at about 500 MHz [@holdijk2026cn101]. Its randomness is pseudo-random: every neuron has its own 65-bit linear-feedback shift register. The paper explicitly does not address the sampling-focused direction that Extropic follows.
+
+Extropic has working X0 test chips and has taped out Z1; Normal reports measured results from CN101. As we'll see, neither has published measured energy numbers for real workloads yet.
+
+## Hardware roadblocks
+
+### 1. Connectivity: sparse chips, dense models
+
+To keep wires short and energy low, cells on a thermodynamic chip only talk to nearby cells. Z1's graph is fixed in silicon: degree 16, and two-colourable, i.e. a chessboard in which every coupling connects a "black" to a "white" cell. As the Thermalizers paper puts it, every model Z1 can express natively "is an RBM-like bipartite model that cannot host a dense interaction graph" [@amico2026thermalizers]. Extropic calls this sparsity "key to its power efficiency" and "a hard constraint of the hardware" [@extropic-z1t-post].
+
+Running a densely connected model on such a chip requires a *minor embedding*: every logical variable becomes a chain of strongly coupled physical p-bits. The cost is concrete. In the Thermalizers paper's Gaussian-process demonstration, a model with 336 logical spins needs 1,774 p-bits at one bit per variable, with chains of up to 18 p-bits each. At eight bits per variable it needs roughly 14,000 p-bits, so that the whole 250,000-p-bit chip only fits a grid of about 32 × 32 to 48 × 48 cells [@amico2026thermalizers].
+
+Dense hardware isn't a way out either. Normal points out that an $N$-dimensional system requires $N^2$ interaction terms [@normal-scaling], so a million variables would need a trillion programmable couplings.
+
+**Being worked on:** models designed for the sparse graph instead of embedded onto it. Z1T uses 4-bit weights and 4-sparse projection matrices to fit Z1's wiring [@extropic-z1t-post]. On Normal's side, a "more compact interaction matrix" is on the 2026 roadmap [@normal-scaling].
+
+### 2. Precision, variability and calibration
+
+A programmed coupling is a physical quantity, and physical devices aren't identical. Extropic's p-bits on the X0 test chip show it directly: "the output statistics of such devices drift from device to device". Every p-bit is calibrated with Bayesian optimisation before first use, leaving "typical per-site calibration errors around 5% in absolute probability" [@verdon2026torx].
+
+Programmable couplings also have a limited range, $|J_{ij}| \le J_\text{max}$. In the Thermalizers meta-EBM experiment, tightening that cap from $J_\text{max} = 10$ to $J_\text{max} = 0.3$ raises the stationary sampling error from 0.024 to 0.46 [@amico2026thermalizers].
+
+Normal's history shows the same problem from the analog side. Its first prototype "was all-analog" and "could only sample from Gaussian distributions"; the company concluded that "the big challenge with purely analog sampling hardware is its lack of reconfigurability" and that "many all-analog approaches will struggle due to parasitic and mismatch effects" [@normal-scaling]. CN101 therefore moved to digital logic on standard CMOS. Digital doesn't remove the precision limit, though. It just moves it: CN101's results settle onto an error floor of about 1% on linear-algebra workloads, and the paper attributes it mainly to the "finite precision of the weight registers", which are 8 bits wide [@holdijk2026cn101].
+
+**Being worked on:** per-p-bit calibration (Extropic), digital state storage (Normal), and "hardware-in-the-loop" training, which "absorbs part of the execution error into the trained parameters" [@amico2026thermalizers]. For CN101, reducing the floor "would require higher-precision weight registers" [@holdijk2026cn101].
+
+### 3. Mixing time: when is the answer ready?
+
+A thermodynamic chip only produces correct samples once its dynamics have reached equilibrium (*burn-in*), and consecutive samples are correlated. The CN101 paper writes the resulting precision of a time-averaged result $\hat y_T$ after $T$ steps as
+
+$$
+\operatorname{Var}(\hat y_T) \approx \frac{\tau_\text{corr} \, \operatorname{Var}_\pi(\phi)}{T},
+$$
+
+where $\tau_\text{corr}$ is the correlation time of the dynamics [@holdijk2026cn101]. The error therefore falls as $O(T^{-1/2})$, and a slowly decorrelating chip needs proportionally longer. "A hardware implementation that encodes the right distribution but either equilibrates or mixes slowly [...] is uncompetitive."
+
+```{ojs}
+//| label: fig-mixing
+//| fig-cap: "Standard error of a time-averaged estimate versus the number of steps T, from Var ≈ τ_corr · Var_π(φ) / T with Var_π(φ) = 1. Every tenfold increase in correlation time costs a tenfold longer run for the same precision."
+{
+  const Ts = d3.range(0, 7.01, 0.05).map(e => 10 ** e);
+  const taus = [1, 10, 100, 1000];
+  const data = taus.flatMap(tau => Ts.map(T => ({
+    tau: `τ_corr = ${tau}`,
+    T,
+    err: Math.sqrt(tau / T),
+  }))).filter(d => d.err <= 10);
+  return Plot.plot({
+    width: 640,
+    x: {type: "log", label: "Steps T →", grid: true},
+    y: {type: "log", label: "↑ Standard error", grid: true},
+    color: {legend: true, scheme: "viridis"},
+    marks: [
+      Plot.line(data, {x: "T", y: "err", stroke: "tau", strokeWidth: 2.5}),
+    ]
+  });
+}
+```
+
+The deeper problem is what the Thermalizers paper calls the mixing–expressivity trade-off. To model data with several distinct modes, an energy-based model needs deep valleys separated by barriers, i.e. large couplings. But Gibbs sampling crosses a barrier only through a sequence of unlikely flips. In their two-spin example the mixing time scales as $e^{2J}$: "Modeling the data faithfully requires large J, while sampling within any fixed budget requires small J" [@amico2026thermalizers]. The CN101 paper names the same issue as its "principal open question": how to design generators "that both equilibrate and mix quickly" [@holdijk2026cn101].
+
+**Being worked on:** splitting generation across a chain of easier models (denoising thermodynamic models [@jelincic2025dtm] and their consistency-model variant), exploiting the fact that clamped inputs "may therefore be coupled arbitrarily strongly to the free spins at no cost in mixing time", and an adaptive correlation penalty during training that bounds the mixing time [@amico2026thermalizers]. Normal considers learned non-equilibrium protocols "the most promising route past the mixing-time barrier" [@holdijk2026cn101].
+
+### 4. I/O: getting data on and off the chip
+
+The sampling itself is cheap; talking to the chip is not. The Thermalizers paper gives a SPICE-based energy breakdown for a single Z1 p-bit node [@amico2026thermalizers]:
+
+```{ojs}
+//| label: fig-io
+//| fig-cap: "Estimated energy per p-bit node on Z1, from SPICE simulations of its circuit modules (Amico et al. 2026, Table IV). Log scale: reading a p-bit costs about 240 Gibbs updates, rewriting its parameters about 21,700."
+{
+  const data = [
+    {op: "Gibbs update", joules: 7.09e-15, label: "7.09 fJ"},
+    {op: "Read state off-chip", joules: 1.692e-12, label: "1.69 pJ"},
+    {op: "Write couplings / biases", joules: 153.6e-12, label: "153.6 pJ"},
+  ];
+  return Plot.plot({
+    width: 640,
+    marginLeft: 170,
+    x: {type: "log", label: "Energy per p-bit node (J) →", grid: true, domain: [1e-15, 1e-9]},
+    y: {domain: data.map(d => d.op), label: null},
+    marks: [
+      Plot.barX(data, {x1: 1e-15, x2: "joules", y: "op", fill: "#00bc8c"}),
+      Plot.text(data, {x: "joules", y: "op", text: "label", dx: 6, textAnchor: "start"}),
+    ]
+  });
+}
+```
+
+That's why "as long as coupling re-flashing is infrequent (no more than about once per second)", the chip is efficient [@amico2026thermalizers]. The current Z1 adds overhead because reads and writes go through a serial interface across each core.
+
+The same pattern shows up at system level. In Extropic's Z1T language-model estimates, "the FPGA consumes the vast majority (>95%) of the energy". The FPGA handles the residual connections and the vocabulary readout, while Z1 samples the next token [@extropic-z1t-post]. On Normal's side, CN101 "is still a test chip, with relatively low-speed I/O interfaces" [@normal-scaling]. When a model spans several CN101 chips, the host reads each chip's running estimate, applies biases, normalisation and activations, and passes the results on [@holdijk2026cn101].
+
+**Being worked on:** architectural optimisations of read and write in the next Z1 revision [@amico2026thermalizers], on-chip control and caching hardware at Normal [@normal-scaling], and "integrated multi-chip hardware, on which the estimate exchange is routed on-board rather than passed through the host" in a later Carnot chip [@holdijk2026cn101].
+
+### 5. Scaling beyond one chip
+
+The interesting models need far more cells than one die. Extropic plans an M.2 stick with two Z1 chips, a PCIe card, and "the world's first billion-pbit cluster" in 2027 [@extropic-onebillion]. Normal describes the road to production as "developing reticle-size chips in modern process nodes with modern interface IP" and is working on "a network-on-chip capable of supporting many more tiles" [@normal-scaling]. CN101 already runs without a global clock: its tiles exchange random bitstreams, and "a delayed or dropped bit changes the number of samples averaged, not the value being averaged" [@holdijk2026cn101]. Normal sees this as removing "the global clock-distribution constraint" on scaling.
+
+### 6. Measurements, not projections
+
+The most mundane roadblock: the energy advantage hasn't been measured yet.
+
+- All Thermalizers demonstrations "are executed in software, based on the device model" of Z1, and "should be read as evidence for the compilation framework [...] not as an explicit end-to-end demonstration of hardware energy efficiency". The authors themselves urge keeping "simulator results, calibrated hardware-model projections, and physical hardware measurements" distinct [@amico2026thermalizers].
+- The refined SPICE-based estimate for Extropic's denoising model workload is 9.8 times higher than the earlier high-level projection, "while remaining within one order of magnitude" [@amico2026thermalizers].
+- Z1T's energy numbers are based on "theoretical chip energy consumption of Z1"; only the H100 baseline is measured. The roughly 14× to 139× advantage depends on the assumed GPU utilisation, and "if we were to batch on the GPU, H100s would be substantially more efficient" [@extropic-z1t-post].
+- For CN101, "the energy and latency targets that motivate the programme are deferred to later chips" [@holdijk2026cn101].
+
+## Software roadblocks
+
+### 1. Models have to be rebuilt
+
+Today's models were co-designed with GPUs. Extropic's Z1T, transformer-like models rebuilt around Z1's sparse wiring, need "about an order of magnitude more FLOPs" than GPT-2 to reach the same loss, and Extropic concludes that "dense models are more efficient per FLOP" [@extropic-z1t-post].
+
+Training energy-based models is hard in itself. For a kernel that samples from a Boltzmann distribution, the gradient of the log-likelihood is [@verdon2026torx]
+
+$$
+\nabla_\theta \log G_\theta(y \mid x) = -\nabla_\theta E(x, y; \theta) \;+\; \mathbb{E}_{y' \sim G_\theta(\cdot \mid x)}\!\left[\nabla_\theta E(x, y'; \theta)\right].
+$$
+
+The second term needs samples from the model itself. Contrastive divergence approximates it with short sampling runs, and its bias "is governed by the mixing time" of the model, which grows as training sharpens it [@amico2026thermalizers]. Some hardware features can't be trained at all yet: with asymmetric couplings, the stationary distribution "generally does not admit a closed-form expression", and the authors consider a learning rule for that case "unlikely given that the problem appears intractable".
+
+Normal takes the opposite route: CN101 runs standard architectures trained on GPUs, quantised to 8-bit weights, "without specialised modifications" [@holdijk2026cn101]. The limits show elsewhere: the chip has no native convolutions (they're expressed as a host-side shift plus a 1 × 1 convolution), and its on-chip weight memory is "too small to hold a general CIFAR model".
+
+### 2. A programming model and an intermediate representation
+
+How do you write a program for a chip that returns samples? Extropic's answer is Torx, built around *Parametrized Stochastic Circuits*: "a gate-based intermediate representation for programmable stochastic dynamics in which typed local stochastic kernels with tunable parameters compose over explicit binary, categorical, and continuous wires" [@verdon2026torx]. The motivation is a classic compiler argument: "Lowering a high-level stochastic map through a complex sequence of physical primitives, communication steps, or digital computations may eliminate the potential advantage of the substrate."
+
+The design borrows openly from quantum software, where frameworks like PennyLane "settled on the circuit as the lowest level of abstraction that remains intelligible and differentiable". The same logical circuit runs on different backends: exact simulation, sampling with software randomness, or sampling with physical randomness from X0 p-bits. In the paper's hardware experiment "the only difference between them is the randomness provider" [@verdon2026torx].
+
+### 3. Compilation is approximate
+
+Extropic's Thermalizers compiles a Torx program to Z1 by replacing each node with a *thermodynamic kernel*, a region of the chip whose energy function is *trained* to reproduce the operation it replaces [@amico2026thermalizers]. A conventional compiler must preserve semantics exactly; this one can't. The paper bounds how the per-kernel errors add up (at worst linearly with program depth) and adds two training passes, context matching and trajectory-level REINFORCE, to reduce them. On a biased random walk they cut the final error from 5.64 to 0.30 to 0.08. But correctness stays subtle: Torx shows that the "natural" edge-by-edge lowering of an Ising model samples the wrong distribution, "nearly eight times worse than chromatic Gibbs" sampling, although every gate is locally fine [@verdon2026torx].
+
+### 4. The back end: placement, scheduling, instruction selection
+
+Below the IR, the open problems sound very familiar to a compiler engineer: placing logical spins onto the fixed chip graph, scheduling parallel updates by graph colouring, and synthesising kernels from a fixed gate set. Torx names "a general theory of synthesizing a target kernel from a fixed gate set" as an open direction [@verdon2026torx], and the Thermalizers authors list "connectivity-aware compilation", which optimises placement together with the kernel parameters, as future work [@amico2026thermalizers].
+
+### 5. Testing and validation
+
+How do you test a program whose correct output is random? Exact simulation of a circuit propagates a probability vector of size $2^n$ for $n$ p-bits, so it is "primarily useful for small-scale prototyping" [@verdon2026torx]. Beyond that, the Thermalizers authors stress that each application still has to be validated "against its own task-level observable" [@amico2026thermalizers]. How to test, debug and verify such programs systematically is left open in all three papers.
+
+I go through all three of these in detail, from the error bounds to the missing tools, in the [compiler deep dive](2026-10-16-compiling-thermodynamic-computers.qmd).
+
+## The roadblocks at a glance
+
+| Roadblock | Concrete evidence | Being worked on |
+|---|---|---|
+| Sparse connectivity | Z1's bipartite degree-16 graph; one logical spin = up to 18 p-bits | Chip-native sparse models (Z1T), compact interaction matrices |
+| Precision & variability | ~5% calibration error on X0 p-bits; ~1% error floor from CN101's 8-bit weights | Calibration, digital state, hardware-in-the-loop training |
+| Mixing time | Mixing time $\propto e^{2J}$ in the simplest example | Denoising chains, correlation penalties, non-equilibrium protocols |
+| I/O | Write ≈ 21,700 Gibbs updates per p-bit; FPGA > 95% of Z1T energy | Faster interfaces, on-chip control and caching |
+| Multi-chip scaling | Host-mediated multi-chip execution on CN101 | Clusters, networks-on-chip, clock-free composition |
+| Measurements | All energy numbers are simulations or projections | Hardware availability from 2027 |
+| Models | ~10× more training FLOPs for Z1T vs GPT-2 | Co-designed sparse models; GPU-trained models on CN101 |
+| Programming model | No standard way to "program a sampler" | Torx and Parametrized Stochastic Circuits |
+| Compilation | Approximate; KL error grows with depth | Thermalizers: context matching, REINFORCE |
+| Back end | Placement, kernel synthesis, libraries are open | Connectivity-aware compilation (future work) |
+| Testing | Exact simulation only for tiny circuits | Largely open |
+
+## Going deeper: the compiler's view
+
+The hardware roadblocks are being tackled by the chip companies with big budgets. The software side, especially the bottom half of that table, is much less settled, and it's where my compiler background might actually be useful. In the follow-up, [Compiling for thermodynamic computers](2026-10-16-compiling-thermodynamic-computers.qmd), I dig into what a program means on this hardware, how lowering becomes learning, what the back end has to solve, and which tools are still missing.
+
+If you're working on any of this, I'd love to hear from you.

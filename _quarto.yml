@@ -1,0 +1,42 @@
+project:
+  type: website
+  render:
+    - "*.qmd"
+    - "!experiments/"
+  resources:
+    - CNAME
+    - assets/docs
+
+website:
+  title: "loop-unroller"
+  site-url: https://loop-unroller.eu
+  favicon: assets/favicon.svg
+  navbar:
+    logo: assets/favicon.svg
+    logo-alt: "loop-unroller logo"
+    left:
+      - href: index.qmd
+        text: Blog
+      - href: about.qmd
+        text: About
+    right:
+      - icon: github
+        href: https://github.com/bievic
+      - icon: linkedin
+        href: https://www.linkedin.com/in/victor-bieszka-a567ba151
+      - icon: rss
+        href: index.xml
+
+format:
+  html:
+    theme:
+      dark: cyborg
+      light: cosmo
+    css: styles.css
+    toc: true
+    html-math-method: mathjax
+    code-copy: true
+    link-external-newwindow: true
+
+execute:
+  freeze: auto

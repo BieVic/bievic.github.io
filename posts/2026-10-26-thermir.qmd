@@ -1,0 +1,214 @@
+---
+title: "A compiler that knows how wrong it is"
+date: 2026-10-26
+draft: true
+description: "I built thermir, an MLIR-based compiler for thermodynamic computers that treats correctness as an error budget. What it can do so far, with measured numbers: certificates, an error profiler, exact gadgets for narrow hardware, a better embedder, calibrated tests at scale, and the miscompilation I wrote myself."
+categories: [compilers, thermodynamic-computing, mlir, testing]
+bibliography: thermodynamic-compilers.bib
+echo: false
+---
+
+In [Compiling for thermodynamic computers](2026-10-16-compiling-thermodynamic-computers.qmd) I argued that the central problem of compiling for a sampler is that a compiled program is never exactly right, only right up to a measurable distance, and that a wrong program doesn't crash: it quietly samples the wrong distribution. In [Unit-testing a sampler](2026-10-19-unit-testing-a-sampler.qmd) I measured what that means for testing.
+
+Since then I've been building the thing those posts describe. It's called thermir, it's built on MLIR, and its source is on [GitHub](https://github.com/BieVic/thermir). <!-- TODO: check the repository is public before publishing --> This post is a progress report: what works, what it measured, and where I was wrong. Everything ran on simulators (Extropic's [THRML](https://github.com/extropic-ai/thrml) for spins, Normal Computing's [thermox](https://github.com/normal-computing/thermox) for Gaussians) and on small models. I'll come back to what that does and doesn't show at the end.
+
+## The idea in one paragraph
+
+Every model carries an error budget: the largest total-variation (TV) distance its compiled version may have from it. Every pass that approximates, such as clipping a coupling to the range the hardware can program, spends some of that budget, and has to *prove* how much with a certificate that works at any model size. For models small enough to enumerate, the compiler also computes the exact answer and fails compilation if the certificate was wrong. Most of what follows is about making that idea survive contact with real hardware constraints.
+
+A model looks like this, from Python:
+
+```python
+import thermir
+
+m = thermir.Model("likelihood", beta=1.0, budget=0.4)
+a, b, x = m.input(), m.input(), m.input()   # clamped: values the caller supplies
+y = m.spin()                                 # free: the output
+m.coupling(a, y, 0.6)
+m.coupling(b, y, -0.5)
+m.coupling(x, y, 0.9)
+
+result = thermir.compile(m, max_coupling=0.4)  # pretend the chip can only do |J| <= 0.4
+```
+
+Underneath, that's a small stack of MLIR dialects, from *what* to sample (`stoch`), to *how* to sample it (`ebm`: an explicit energy and sweep schedule), to *how to run it* on a device (`dev`: flashes, clamps, sweeps and reads), and finally to runnable THRML code.
+
+## Certificates: sound, and honestly loose
+
+The model above is a kernel: with the three inputs clamped, it's a lookup table from 8 input values to a distribution over `y`. Clipping the couplings to 0.4 changes that table, and the compiler has to bound by how much, for the *worst* input, without enumerating inputs (with 30 inputs it couldn't).
+
+```{ojs}
+//| label: fig-certificates
+//| fig-cap: "Certified error against the exact error for the clipped kernel above, and for a two-kernel program built from it (a prior feeding the likelihood). Certificates must never fall below the exact error; how far above they sit is the price of not enumerating."
+{
+  const data = [
+    {what: "kernel", kind: "exact", tv: 0.191},
+    {what: "kernel", kind: "certified", tv: 0.380},
+    {what: "program", kind: "exact", tv: 0.164},
+    {what: "program", kind: "certified", tv: 0.492},
+  ];
+  return Plot.plot({
+    width: 640,
+    marginLeft: 70,
+    marginRight: 50,
+    x: {label: "Total-variation distance to the target →", domain: [0, 0.55], grid: true},
+    y: {label: null, domain: ["exact", "certified"], axis: null},
+    fy: {label: null, domain: ["kernel", "program"]},
+    color: {legend: true, domain: ["exact", "certified"], range: ["#00bc8c", "#f2a541"]},
+    marks: [
+      Plot.barX(data, {x: "tv", y: "kind", fy: "what", fill: "kind", inset: 2}),
+      Plot.text(data, {x: "tv", y: "kind", fy: "what", text: d => d.tv.toFixed(3), dx: 6, textAnchor: "start"}),
+    ]
+  });
+}
+```
+
+Two numbers matter here. The certificate is always above the exact error: on a 2,000-model stress test, no violation beyond floating-point noise (with one embarrassing exception the stress test didn't reach; more on that below). And it's loose: about 2× for the kernel (a median of about 2× on random models), and 3× for the program. The program's certificate adds up its kernels' certificates. thermir does shrink a kernel's error by how much the kernels after it forget their inputs (a local *contraction* bound, the open problem from the testing post), but here the prior's samples are also part of the output, so its error arrives undiminished. What's left of the gap is that errors of different kernels partly cancel, which no bound here captures.
+
+## A profiler for wrongness
+
+In the compiler post I asked for "a profiler for wrongness": a tool that says *where* a program's error budget goes, the way a profiler says where the time goes. thermir has one now. Below is a two-kernel program compiled for a small device with a coupling range of 0.5, as `--error-report` prints it:
+
+```
+error report for @posterior, as run by @posterior.dev
+  error bound 0.171 of budget 0.5 (34.2%); expected time 0.000212
+
+  #    kernel                     run   fitting   sampler    mixing     tails     total   share   reach  bound
+  0    @prior                2 sweeps    0.0218         0   0.00338         -    0.0252   14.8%   0.307  exact
+  1    @likelihood            1 sweep     0.146         0         0         -     0.146   85.2%       1  exact
+
+  by source: fitting 0.167 (98%), sampler 0 (0%), mixing 0.00338 (1.98%), tails 0 (0%)
+  largest: #1 @likelihood, 0.146, mostly fitting
+```
+
+Each row splits one kernel application's error into fitting (squeezing the model into the hardware's range), the sampler (a schedule that isn't exactly Gibbs), mixing (finitely many sweeps) and tails (real-valued inputs straying outside the range a Gaussian kernel was certified for). Each row counts its error as it reaches the program's output: here the prior's samples only feed the likelihood, which partly forgets its inputs, so only 31% of the prior's error arrives (the reach column). The rows add up to the program's checked bound exactly.
+
+The interesting part is the last two lines. I expected mixing to dominate, since that's what everyone worries about. On limited hardware, fitting is 98% of the error. Running more sweeps would buy almost nothing; a device with a wider coupling range, or a smarter lowering, would buy a lot. A profiler should give that kind of answer, and this one pointed directly at the next problem.
+
+## Narrow hardware, part 1: gadgets that fit
+
+Hardware couples *pairs* of spins. Logic and parity constraints need interactions among three or more, like $J\, s_a s_b s_c$. The standard trick is a gadget: an extra, hidden spin coupled to the three, whose effect, once you sum it out, is exactly the three-body term (plus lower-order terms you cancel elsewhere). thermir builds gadgets that are exact, not penalties that are only exact in some limit, and certifies them at about $10^{-15}$ without trusting how they were built.
+
+The problem is that a compact gadget needs couplings much *stronger* than the term. A three-body term of 0.8 needs gadget couplings of about 2.2. On a chip whose range is 0.5, those get clipped, and the error report shows fitting going through the roof. On 20 random models with coupling ranges of 0.3–0.6, clipped compact gadgets were off by up to 0.82 in TV. With errors that large, it's a different program.
+
+The fix turned out to be a neat bit of symmetry. Flip the sign of one gadget's coupling to spin $i$ and every term involving $i$ flips sign too. Now take all sign patterns with an *even* number of minus signs. The three-body term never changes sign across them, but every lower-order term appears equally often with each sign, and cancels exactly. A family of $2^{k-1}$ gadgets, each carrying a share of the term, reproduces it with no compensating couplings at all. And weaker shares need weaker couplings, so repeating the family until the couplings fit trades accuracy problems for extra spins:
+
+| Coupling range | Hidden spins (three-body term of 0.8) | Largest coupling | Error |
+|---|---|---|---|
+| none (compact gadget) | 1 | 2.2 | clipped on real hardware |
+| 1.0 | 4 | 0.85 | exact |
+| 0.5 | 16 | 0.45 | exact |
+| 0.4 | 32 | 0.34 | exact |
+| 0.3 | 64 | 0.26 | exact |
+
+On the same 20 random models, the fitted families stayed within range and matched an independently computed target within $10^{-9}$, in all 20. "Exact" here means what it says: the error is floating-point rounding. The cost moved from *wrongness* to *chip area*, which is the trade a compiler should make, because chip area shows up in a cost model and wrongness doesn't show up anywhere.
+
+## Narrow hardware, part 2: where I was wrong about embedding
+
+Those gadget families create a new problem. Every gadget connects to all three spins of its term, so three spins and four gadgets form the complete bipartite graph $K_{3,4}$. No sparse chip has that, so each spin has to be spread over a chain of physical nodes that are coupled strongly enough to agree. That's *minor embedding*, and compilers for D-Wave machines have done it for a decade [@cai2014minor]. thermir keeps only samples where every chain agrees, which keeps the result exact; the price is throughput.
+
+My first embedder was the greedy half of the standard heuristic. It failed to embed $K_5$ on a 6×6 grid, and I wrote in the design notes that this was the greedy embedder's fault, since a 6×6 grid "has room for one". When I finally implemented the full algorithm (rip-up and reroute: let chains overlap, then repeatedly tear them up and reroute them with overlaps getting more and more expensive), it *still* couldn't. It got stuck at exactly one overlap, every time.
+
+It wasn't the algorithm. A grid is planar, and chains can't make a graph less planar. $K_5$ and $K_{3,3}$ are exactly the graphs that can't be drawn without crossings, so no embedder, with chains of any length, will ever fit them on a grid. Neither can a single gadget family, because $K_{3,4}$ contains $K_{3,3}$. The 6×6 grid never had room. A chip with only nearest-neighbour couplings in a plane can't run any model whose graph is non-planar, and no compiler can help with that. Add diagonal couplings (a "king's graph") and the problem disappears.
+
+With that sorted out, the full algorithm did make a real difference. I needed one more trick: in the gadget case, the search got stuck because a busy spin's chain stayed a single node and its sixteen neighbours crowded around it. Borrowing from FPGA routing (*negotiated congestion*, as in PathFinder), nodes that stay contested get permanently more expensive, which breaks the deadlock. On 60 random models of 5–9 spins:
+
+```{ojs}
+//| label: fig-embedding
+//| fig-cap: "Random models (5–9 spins) embedded by greedy placement alone and with rip-up and reroute, each checked structurally (disjoint, connected chains realising every coupling). The plain grid is planar, so most failures there are impossible for any embedder."
+{
+  const data = [
+    {device: "4×4 grid", method: "greedy", n: 16},
+    {device: "4×4 grid", method: "rip-up and reroute", n: 23},
+    {device: "5×5 king's graph", method: "greedy", n: 49},
+    {device: "5×5 king's graph", method: "rip-up and reroute", n: 55},
+    {device: "6×6 king's graph", method: "greedy", n: 50},
+    {device: "6×6 king's graph", method: "rip-up and reroute", n: 58},
+  ];
+  return Plot.plot({
+    width: 640,
+    marginLeft: 130,
+    marginRight: 40,
+    x: {label: "Models embedded (of 60) →", domain: [0, 60], grid: true},
+    y: {label: null, domain: ["greedy", "rip-up and reroute"], axis: null},
+    fy: {label: null, domain: ["4×4 grid", "5×5 king's graph", "6×6 king's graph"]},
+    color: {legend: true, domain: ["greedy", "rip-up and reroute"], range: ["#f2a541", "#00bc8c"]},
+    marks: [
+      Plot.barX(data, {x: "n", y: "method", fy: "device", fill: "method", inset: 2}),
+      Plot.text(data, {x: "n", y: "method", fy: "device", text: "n", dx: 6, textAnchor: "start"}),
+    ]
+  });
+}
+```
+
+The models still failing on the king's graphs are dense 9-spin ones (27–33 of 36 possible couplings), probably too big for those devices. Complete graphs up to $K_{12}$ now embed, and so do the gadget families: a three-body term at a coupling range of 1.0 runs on 10 physical nodes, certified exact, keeping 67% of samples.
+
+Two smaller back-end results sit next to this:
+
+- **Chain strength is a knob, not a constant.** The usual default is the strongest coupling the chip allows, which keeps the most samples but mixes slowest. thermir can instead pick the coupling with the cheapest *kept* sample. On a small example it picked 0.39 over 1.05: fewer samples survive, but each costs 1.8× less. Across 30 random models, the tuned programs were never slower, with a median speed-up of 1.26×. Kept samples follow the same distribution either way, so this needs no certificate at all.
+- **Update groups.** Some chips can only update fixed groups of nodes together, so one sweep takes one step per group the program touches. With four groups, a placement that only touches two of them halves the sweep time. An even ring fits in two, an odd ring needs three, and $K_5$ needs all four. Again free: it changes speed, not the distribution.
+
+## Testing at scale: unit-testing a sampler, part 2
+
+The testing post ended with exact tests that only work for 8 spins. thermir needed something for models too big to enumerate, where no certificate covers the schedule. The motivating case is the miscompilation from that post: lowering an Ising model to one two-spin gate per edge, which each look right but compose to the wrong distribution [@verdon2026torx]. On a 64-spin ring, nothing caught it.
+
+The fix is a differential test (`--ebm-diagnose`): simulate the compiled sampler and a reference sampler of the target side by side, and compare observables the *compiler* chooses, because it knows the model's structure: every output's magnetisation, every coupled pair's correlation, the mean magnetisation of every connected group (which tells apart modes a symmetric energy can't), and the energy. Standard errors use batch means, with batches stretched to about ten autocorrelation times.
+
+Here's the part I'm a little embarrassed about. My first version used the textbook mixing check, a fixed R-hat threshold of 1.01. On a *correct* 64-spin ring, with about 20 effective samples per chain, it reported R-hat 1.12: "not mixed". That false alarm disabled the differential test, which then missed the miscompilation. The lesson from the testing post, uncalibrated tests cry wolf, bit me in my own code. And it was worse than crying wolf: the false alarm hid a real bug.
+
+So every decision is now a test with a stated false-alarm rate. Measured on random correct samplers and on miscompiled ones:
+
+| Check | Samplers | Result | Nominal |
+|---|---|---|---|
+| Differential test, false alarms | 200 correct, 3,000 sweeps | 4.5% | 5% |
+| Differential test, false alarms | 200 correct, 10,000 sweeps | 4.0% | 5% |
+| Differential test, detection | 40 edge-by-edge lowerings | 40 of 40 | |
+| Mixing check, frozen rings | 10 rings, 16–52 spins | 10 of 10, all through a magnetisation | |
+
+At 64 spins, far beyond enumeration, the edge-by-edge lowering is now unmistakable: its mean energy is 38.2 ± 0.07, against the target's 63.7 ± 0.08. And a frozen 64-spin ferromagnet is flagged as not mixed with $p = 4 \cdot 10^{-40}$, through a magnetisation, exactly where R-hat on the energy said everything was fine in the testing post.
+
+One rule turned out to matter more than any statistic: an estimate never holds a budget. Simulation results are labelled as estimates everywhere. A device program that has to rely on one gets an explicit `fallback=estimate` or a warning, never a silent certificate.
+
+## The miscompilation I wrote myself
+
+A compiler that certifies other people's errors had better not have its own. Mine did.
+
+One of the certificates bounds how far a changed field moves a spin's probability. It worked in probabilities. Once the argument of a sigmoid exceeds about 37, the sigmoid rounds to exactly 0 or 1 in double precision, and the bound returned 0 for such terms, although a large change still moves them a lot. Clipping a field of 30 down to 1 really costs 0.119 in TV, and it was certified as free. Because the compiler takes the *smaller* of two certificates, the wrong 0 won.
+
+Up to 16 spins, where the exact check runs, it caught this immediately ("a certificate is wrong"). Above that, nothing did: a 17-spin model compiled with a real error 12 times its budget, and the compiler reported success. The earlier stress tests missed it because their random parameters never got large enough to saturate.
+
+The fix computes the bound in logits throughout, using a form of the sigmoid difference that neither saturates nor cancels. Against 50-digit arithmetic, it's accurate to $4.5 \cdot 10^{-16}$, while the old form was off by up to 3.6% even before saturating, a second, quieter soundness problem. A new stress test with 3,000 models pushed deliberately into the saturating range (2,525 of them saturated) found no violations, after every apparent one was rechecked in 60- to 150-digit arithmetic.
+
+The lesson is boring and important: a soundness test has to cover the ranges where floating point breaks down, not the ranges where models are typical. Typical models are exactly where bugs like this hide.
+
+## The rest of the toolbox
+
+A few more things exist now, briefly:
+
+- **Programs, not just samplers.** Kernels compose into programs with clamping, and programs lower to device programs: flashes, clamps, sweeps and reads, in order, with sweep counts planned so that every read stays within budget from the *worst* starting state. Planning exactly where possible matters: in one example, exact analysis needs 5 sweeps where the certificate alone asks for 11, and reordering cut coupling flashes, the most expensive operation, from 4 to 2.
+- **Continuous values.** A Gaussian path compiles to Langevin samplers for analog hardware like CN101 [@holdijk2026cn101], with exact error analysis, because everything stays Gaussian. Accounting exactly for the correlation between consecutive reads made one certified result 5× cheaper than treating reads as independent. As a demo, `thermir.linalg.solve(A, b, tolerance=1e-2)` returns a solution certified to be within 0.01 per component, except with probability at most 0.001.
+- **Expectation readouts** with $(\varepsilon, \delta)$ guarantees, for when you want an average, not a sample.
+
+::: {.callout-tip title="My take: what surprised me"}
+Three things I didn't expect when I started:
+
+1. **The certificates were the easy part.** Writing a sound bound took days; making the *tests* of that bound trustworthy took longer, and found the worst bug.
+2. **Fitting beats mixing.** Everyone (me included) worries about how long a sampler takes to mix. On narrow hardware, the error profiler says the budget goes to squeezing the model into the chip.
+3. **Some limits are mathematical, not engineering.** No embedder will put a non-planar model on a planar chip. A compiler can't fix that, but it can say so up front instead of failing after 16 attempts.
+:::
+
+## Limitations
+
+The same caveats as in the testing post, and a few new ones:
+
+- **Small sizes.** Most of the results above come from 4×4 to 12×12 grids, and exact checks stop at 16 nodes. I have since run a first scaling benchmark (50–400 spins on devices of 1,024 and 2,048 nodes; see the end of this post), but real chips have more, and nothing here has touched real hardware.
+- **Simulators only.** No real hardware, so no calibration error, drift or noise mismatch.
+- **Made-up devices.** The device descriptions (coupling ranges, update groups, costs) are plausible stand-ins, not vendor figures.
+- **The biggest gap is mixing.** Strongly coupled samplers, and every chained or gadget-based one, defeat the mixing certificate thermir has (Dobrushin's condition). Above the exact checker's size, their sweep counts come from estimates, clearly labelled, but estimates. A certified mixing bound for strongly coupled samplers is the most important missing piece.
+- **This is the layer below.** Nobody should have to write Ising models by hand. thermir is meant to be the compiler layer under a future frontend that feels as familiar as CUDA feels to a C++ developer. That frontend doesn't exist yet.
+
+## What's next
+
+I did the scaling benchmark I'd planned for this post, and it was worth doing. Models of 50 to 400 spins on devices of 1,024 and 2,048 nodes showed that everything except placement scales: at 400 spins the whole pipeline (certificates, device-program planning, checking, the error report) takes 64 milliseconds. Placement was the exception. A 400-spin lattice, which fits on the chip without any chains, took minutes, because the search started from a bad corner; centring it on the chip and looking one step ahead brought that to 0.05 seconds. Where chains are needed, my embedder is still up to 1.7× less compact than minorminer, D-Wave's implementation of the same algorithm, and 6 to 150 times slower. The lesson of the planarity story holds at scale too: embedded is not the same as usable. A chain of 40 nodes holds together only with a strong coupling, and strong couplings are exactly what defeats the mixing certificate.
+
+That is the next thing I'm tackling: a mixing certificate that works where Dobrushin's condition fails. Without it, the compiler knows how wrong its programs are everywhere except where it matters most, after a long run on a strongly coupled chip. The plan is to start with a prototype that computes the true mixing time of small chained samplers exactly, and compare candidate bounds (updating each chain as one block, path coupling, a spectral-gap comparison against the unchained sampler) against it, before building any of them into the compiler. If one of them is tight enough, it goes in; if none is, that is a result worth writing up too.

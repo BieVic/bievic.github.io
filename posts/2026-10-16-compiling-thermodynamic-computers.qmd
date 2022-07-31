@@ -1,0 +1,482 @@
+---
+title: "Compiling for thermodynamic computers"
+date: 2026-10-16
+draft: false
+description: "A compiler engineer's deep dive into the software side of thermodynamic processors: what a program means, how lowering becomes learning, what the back end has to solve, which tools are missing, and where the biggest opportunities are."
+categories: [compilers, thermodynamic-computing, hardware]
+bibliography: thermodynamic-compilers.bib
+echo: false
+---
+
+In the [previous post](2026-10-11-thermodynamic-roadblocks.qmd) I went through the roadblocks thermodynamic processors face and ended with a teaser: the software problems are, to a surprising degree, *compiler* problems. This post is the deep dive.
+
+::: {.callout-note title="TL;DR"}
+A compiler for a thermodynamic computer has to do everything a classic compiler does, but almost every step changes character: correctness becomes an error budget, lowering becomes training, placement feeds back into what the "instructions" are, and testing becomes statistics. The foundations exist (Torx as an IR, Thermalizers as a lowering with provable error accounting), but most of the tooling doesn't. The biggest opportunities I see: error-aware compilation as a discipline, joint placement and training, and a theory of kernel synthesis.
+:::
+
+The ground rules are the same as last time. Facts about the existing stacks come from what the companies have published themselves, mainly Extropic's Torx [@verdon2026torx] and Thermalizers [@amico2026thermalizers] papers and Normal Computing's CN101 paper [@holdijk2026cn101]. But this post also contains opinions: where I see gaps, analogies and opportunities. To keep the two apart, my own proposals are marked like this:
+
+::: {.callout-tip title="My take"}
+Everything in a box like this is my interpretation or proposal, not something the papers claim.
+:::
+
+## 1. Two stacks, two compilation problems
+
+The two companies don't just build different chips; they compile different kinds of programs.
+
+**Extropic** compiles *stochastic programs*. A program is a composition of stochastic kernels, conditional distributions that map inputs to random outputs, and the target is Z1, a chip that natively does one thing: Gibbs sampling of a pairwise energy-based model on a fixed sparse graph. The stack has three layers [@verdon2026torx; @amico2026thermalizers]:
+
+- **Torx**, a JAX framework whose programs are *Parametrized Stochastic Circuits* (PSCs), "a gate-based intermediate representation for programmable stochastic dynamics".
+- **Thermalizers**, which "takes a stochastic program expressed in the torx library and replaces its factors with thermodynamic kernels".
+- **THRML**, which samples those energy-based models, in software today and on the chip later. Extropic's own analogy: "Torx is to THRML what PyTorch is to CUDA" [@extropic-onebillion].
+
+**Normal** compiles *deterministic functions* that are evaluated as time-averages of a stochastic process. CN101's workloads are "deep nested compositions of affine maps and elementwise nonlinearities", i.e. neural networks. Its deployment recipe is short: train off-chip in floating point, quantise the weights "to 8-bit integers in 64 × 64 blocks", and assign the blocks to tiles and chips, "the partition being the only model-dependent choice" [@holdijk2026cn101].
+
+```{mermaid}
+%%| fig-cap: "The two published stacks. Extropic lowers stochastic programs into energy-based models; Normal maps quantised neural networks onto tiles that compute by time-averaging."
+flowchart TB
+    subgraph E["Extropic"]
+        direction TB
+        e1["Stochastic program<br/>(Torx: Parametrized Stochastic Circuit)"] --> e2["Directed factor graph<br/>of stochastic kernels"]
+        e2 --> e3["Thermodynamic kernels<br/>(Thermalizers: variational compilation)"]
+        e3 --> e4["Energy-based model on the chip graph<br/>(THRML)"]
+        e4 --> e5["Z1: couplings, biases, clamps;<br/>chromatic Gibbs sweeps"]
+    end
+    subgraph N["Normal Computing"]
+        direction TB
+        n1["Neural network<br/>(trained in floating point)"] --> n2["8-bit weights in<br/>64 × 64 blocks"]
+        n2 --> n3["Blocks pinned to tiles and chips"]
+        n3 --> n4["CN101: time-averaged readout;<br/>window T, sync interval Δ"]
+    end
+```
+
+Most of this post is about the Extropic-style stack, because it is the one where compilation is genuinely new. But CN101 raises its own compiler questions, and I'll come back to them in the back-end section.
+
+## 2. What does a program mean, and what is a correct compilation?
+
+Every compiler starts from semantics. A classic compiler maps a program to a function and must preserve it exactly. Here, the meaning of a program is a probability distribution, and exact preservation is impossible.
+
+### Programs denote kernels
+
+In Torx, every gate is a stochastic kernel $K(y \mid x)$, and the semantics compose cleanly: sequential composition is an integral (for discrete states "ordinary matrix multiplication"), parallel composition is a tensor product, and a whole circuit is again a kernel [@verdon2026torx]. That's a nice denotational semantics. Every compiled kernel, however, is only an approximation $\tilde P_\ell$ of its target $P_\ell$.
+
+On CN101 the semantics are different again: a computation is $f(x) = \mathbb{E}_\pi[\phi(S)]$, the stationary expectation of an ergodic process, and the chip outputs the time-average $\hat y_T$ over $T$ cycles, which converges to $f(x)$ as $T \to \infty$ [@holdijk2026cn101]. Correctness is asymptotic, and every finite run returns an estimate.
+
+### Correctness becomes a budget
+
+Thermalizers makes "approximately correct" precise. With $J_\ell$ the KL divergence between kernel $\ell$ and its target, $\varepsilon_\ell$ its average over the inputs the target program produces, and $\mu_\ell$ the input distribution a kernel was trained under, the paper proves [@amico2026thermalizers]
+
+$$
+D_\text{KL}\big(R_\# P \,\|\, R_\# \tilde P_\varphi\big)
+\;\le\; D_\text{KL}\big(P \,\|\, \tilde P_\varphi\big)
+\;=\; \sum_{\ell=1}^{L} \varepsilon_\ell(\varphi_\ell)
+\;\le\; \sum_{\ell=1}^{L} c_\ell\, \mathbb{E}_{x \sim \mu_\ell}\big[J_\ell(x; \varphi_\ell)\big],
+$$
+
+where $R$ is any readout of the program and $c_\ell = \max_x q_{\ell-1}(x) / \mu_\ell(x)$ measures how far the training inputs were from the real ones. Three things follow:
+
+1. **The error of a program is the sum of the errors of its parts.** The objective "splits over kernels, which is why we train each kernel independently".
+2. **The error grows at worst linearly with depth.**
+3. **Training a kernel without knowing its context costs a factor $c_\ell$.** For a uniform input distribution over $n_\text{in}$ input spins, $c_\ell = 2^{n_\text{in}} \max_x q_{\ell-1}(x)$.
+
+The linear bound is pessimistic for an important class of programs. In total variation, every Markov kernel is non-expansive, and kernels that mix contract distances by a factor $\rho < 1$ (the Dobrushin coefficient). Let $\iota_\ell$ be the error (in total variation) that kernel $\ell$ adds on the inputs it actually receives in the compiled program, and $\tilde\delta_L$ the total-variation distance between the compiled and the target distribution at wire $L$. The paper shows that the injected errors then accumulate only up to a depth-independent floor [@amico2026thermalizers]:
+
+$$
+\tilde\delta_L \;\le\; \sum_{\ell=1}^{L} \rho^{\,L-\ell}\, \iota_\ell \;\le\; \frac{\max_\ell \iota_\ell}{1-\rho}.
+$$
+
+In the meta-EBM experiment, the measured floor sits at about 0.6× this bound across a sweep of coupling caps, "a reasonably tight upper envelope rather than an order-of-magnitude estimate".
+
+```{ojs}
+viewof eps = Inputs.range([0.001, 0.1], {value: 0.02, step: 0.001, label: "Per-kernel error ε"})
+```
+
+```{ojs}
+viewof rho = Inputs.range([0, 0.99], {value: 0.5, step: 0.01, label: "Contraction ρ"})
+```
+
+```{ojs}
+//| label: fig-budget
+//| fig-cap: "Upper bounds on the total-variation error of a compiled program of depth L, with every kernel injecting at most ε: the linear budget L·ε, valid for any program, and the contracting bound ε(1−ρ^L)/(1−ρ), valid when the target kernels contract by ρ (Amico et al. 2026, Eqs. G6 and G9). Both are capped at 1, the maximum TV distance."
+{
+  const Ls = d3.range(1, 101);
+  const data = Ls.flatMap(L => [
+    {L, bound: Math.min(1, L * eps), kind: "linear budget (any program)"},
+    {L, bound: Math.min(1, eps * (1 - rho ** L) / (1 - rho)), kind: "contracting targets (ρ < 1)"},
+  ]);
+  return Plot.plot({
+    width: 640,
+    x: {label: "Program depth L →", grid: true},
+    y: {label: "↑ Error bound (TV)", domain: [0, 1], grid: true},
+    color: {legend: true, range: ["#e45756", "#00bc8c"]},
+    marks: [
+      Plot.line(data, {x: "L", y: "bound", stroke: "kind", strokeWidth: 2.5}),
+      Plot.ruleY([eps / (1 - rho)], {stroke: "#00bc8c", strokeDasharray: "4,4", strokeOpacity: 0.7}),
+    ]
+  });
+}
+```
+
+::: {.callout-tip title="My take"}
+This turns compiler correctness into resource management. A compiler for this hardware should carry an *error budget* through its passes the way a numerical compiler tracks precision: every pass that approximates (lowering a kernel, discretising a continuous variable, capping couplings, truncating sweeps) spends part of it, and the bounds above say how the parts add up. Whether a program can afford a cheaper, less accurate lowering then becomes a decision the compiler can make and justify, instead of an accident.
+:::
+
+### Composition is subtle: two miscompilations
+
+Local correctness doesn't guarantee global correctness, and both papers contain an example.
+
+**Torx: the edge-by-edge Ising lowering.** A natural way to sample an Ising model is to put one two-spin Glauber gate on every edge and compose them. Each gate is fine. But the composed generator "is not the Glauber generator for the full ring", because the sigmoid is nonlinear: $\sum_j \sigma(\alpha_j) \ne \sigma(\sum_j \alpha_j)$. The stationary distribution is wrong, with a total-variation distance of 0.402 to the target, "nearly eight times worse than chromatic Gibbs". The fix is a gate that sees a site and all its neighbours at once [@verdon2026torx].
+
+**Thermalizers: kernels without a common energy.** When a Gibbs sampler for a non-native energy is compiled kernel by kernel, each compiled update is "a fresh clamped thermalization", and "the realized conditionals are in general the full conditionals of no common energy, so no common invariant measure exists" [@amico2026thermalizers]. The composed sampler still works, but its bias is now governed by the perturbation bound above, not by detailed balance.
+
+::: {.callout-tip title="My take"}
+Both are exactly the kind of bug a compiler should catch statically: the first violates an invariant ("the composition must have the intended stationary distribution"), the second loses one ("all kernels share one energy"). An analysis that tracks which invariants a lowering preserves (detailed balance with respect to which distribution, which kernels share an energy) would be the stochastic equivalent of type checking. Nothing like it exists in the published tools yet.
+:::
+
+## 3. The intermediate representations
+
+### What Torx gets right
+
+Torx's design choices read like a checklist of good IR design [@verdon2026torx]:
+
+- **Typed wires.** Wires carry a p-bit ($\{0,1\}$), a p-dit (categorical over $d$ states) or a p-mode (a continuous density over $\mathbb{R}^N$), and gates are typed by the wires they act on.
+- **Explicit supports and layers.** A layer is a set of gates with "pairwise disjoint supports" that execute in parallel, and every PSC "unrolls to a DFG by treating each gate as a kernel and each wire segment as a shared variable". The layered form "makes compilation to hardware more obvious", and "torx keeps the support $I_j$ of every gate visible so that this compilation is explicit".
+- **Retargetability.** "The same logical PSC compiles to different gate schedules on each chip": XTR-0 "reconstructs any k-local generator off-chip via the FPGA, paying a per-gate round-trip latency", while Z1 "evaluates 2-local Glauber generators natively in a single sweep but requires compilation".
+- **Swappable randomness.** A backend can replace the software pseudo-random generator with physical randomness from X0 p-bits, and in the hardware experiment "the logical circuits are unchanged, and the only difference between them is the randomness source".
+
+The motivation is the core compiler argument: "Lowering a high-level stochastic map through a complex sequence of physical primitives, communication steps, or digital computations may eliminate the potential advantage of the substrate."
+
+### The thermodynamic kernel as the central IR
+
+Thermalizers introduces the IR level below that. A *thermodynamic kernel* is a region of an energy-based model with input spins $x$, hidden spins $w$ and output spins $y$. It is executed by clamping $x$, letting $(w, y)$ thermalise and reading $y$ [@amico2026thermalizers]:
+
+$$
+\tilde P^F(y \mid x;\varphi) = \frac{\sum_w e^{-E_\varphi(x,w,y)}}{\sum_{w,y'} e^{-E_\varphi(x,w,y')}}.
+$$
+
+The paper calls this kernel "the compiler intermediate representation between directed probabilistic computation and the undirected equilibrium distributions realized by the substrate". Put differently, a program is *directed* (inputs to outputs), the hardware is *undirected* (an equilibrium distribution with no notion of input or output), and the clamping pattern is what turns one into the other.
+
+### Clamping patterns as calling conventions
+
+The same programmed energy can be run in different directions just by changing which spins are clamped. The Gaussian demonstration runs a hierarchical model *forward* (clamp the coarse field, sample the fine field) or *backward* (clamp the measurements, sample the posterior) "with the same energy programming" [@amico2026thermalizers].
+
+There's a catch. Compiling the forward conditional determines the energy only up to an arbitrary function of the inputs: for any $\lambda(x)$, the energy $E_\varphi(x,w,y) - \lambda(x)$ yields exactly the same forward kernel, but a different backward kernel. "Forward compilation thus determines an equivalence class of energies", and picking a representative "is just a convention when considering a single conditional but it starts to matter once forward-compiled conditionals are tiled together" [@amico2026thermalizers].
+
+::: {.callout-tip title="My take"}
+In compiler terms, a clamping pattern is a calling convention, and the choice of $\lambda$ is part of the ABI of a compiled kernel. If one module calls a kernel forward and another calls it backward, both have to agree on that representative, just as two object files have to agree on how arguments are passed. The IR should make the clamping pattern and the normalisation convention explicit attributes of a kernel, not implicit properties of how it happened to be trained.
+:::
+
+### Lowering types: continuous values on binary hardware
+
+Z1 only has binary spins, so continuous variables need a representation. Thermalizers uses a linear "fixed-point expansion": each coordinate becomes a block of $b$ p-bits with power-of-two weights, which "preserves the polynomial order of the energy" [@amico2026thermalizers]. The bit width is a real trade-off. In the Gaussian demonstration, discretisation shifts the posterior mean by 53.2%, 2.1% and 1.8% of the field spread at 4, 6 and 8 bits, and at 8 bits "the eight-bit value is already at the Monte Carlo floor". More bits cost more p-bits: the eight-bit version of that model needs roughly 14,000 of them.
+
+::: {.callout-tip title="My take"}
+This is bit-width selection, a problem compilers for fixed-point DSPs and quantised neural networks know well, with one twist: the right width depends on the Monte Carlo floor, i.e. on how long you plan to sample. Spending bits below the noise floor is wasted hardware. A compiler that knows the sampling budget could choose widths automatically.
+:::
+
+### A proposal: a multi-level IR
+
+::: {.callout-tip title="My take"}
+Each artifact in the papers sits at a distinct abstraction level, which suggests an MLIR-style stack of dialects. Every level below already exists *implicitly* in Torx or Thermalizers; the proposal is to make each one an explicit, inspectable, verifiable representation:
+
+| Level | Represents | Exists today as |
+|---|---|---|
+| Stochastic program | Typed wires, gates, layers | Torx PSC / DFG |
+| Kernel graph | Kernels with targets, clamping patterns, error budgets | Thermalizers' compiled DFG |
+| Energy model | Hypergraph energy, hidden spins, coupling caps | THM in THRML |
+| Physical layout | Placed spins, chains, colour classes | Embedding in the Gaussian demo |
+| Device program | Flashes, clamps, sweep counts, readouts | Implicit in the experiments |
+
+The payoff is the usual one: each pass has a well-defined input and output, invariants can be checked at each boundary, and tools (visualisers, profilers, verifiers) can attach to any level.
+:::
+
+## 4. The middle end: lowering is learning
+
+This is where thermodynamic compilation departs most from anything I know. In a classic compiler, lowering an operation means choosing instructions. In Thermalizers, lowering a kernel means training an energy-based model until its conditional matches the target. The paper calls this *variational compilation* [@amico2026thermalizers].
+
+### Four ways to lower a kernel
+
+How expensive that training is depends on two questions: how is the target given, and can the compiled kernel's conditional be computed exactly? The paper works out all combinations [@amico2026thermalizers]:
+
+| | Tractable model | Intractable model |
+|---|---|---|
+| **Explicit target** (closed-form conditional) | Exact loss and gradient; closed-form solution when the kernel can express the target | Exact target sums; both phases estimated by Gibbs sampling |
+| **Sampled target** (sampler or recorded data) | Exact autodiff on Monte Carlo pairs ("conditional maximum likelihood") | Gibbs-sampled phases on Monte Carlo pairs ("conditional CD") |
+
+The top-left cell can be completely free. A probabilistic NOT gate that preserves its input with probability $\sigma(\theta)$ compiles in closed form to $h_y = 0$, $J_{xy} = \theta/2$: two p-bits, one coupling, no training. The bottom-right cell is the expensive one. Its bias "is governed by the mixing time of the clamped kernel", which grows as training sharpens the kernel.
+
+::: {.callout-tip title="My take"}
+The closed-form path is the analogue of constant folding and peephole rules: when a pattern has a known exact lowering, use it instead of the general (expensive, approximate) mechanism. A practical compiler would want a large table of such rules for common gates, falling back to training only where necessary.
+:::
+
+### Analytic kernels: one knob between compile cost and expressivity
+
+Thermalizers also shows how to make larger kernels tractable. An *analytic thermodynamic kernel* (ATK) splits its spins into a small enumerated core and a periphery of hidden spins that are summed out in closed form. That works as long as no two periphery spins are coupled. The normalised conditional then costs
+
+$$
+O\big(2^{|C|} \cdot (n_u + \text{nnz})\big)
+$$
+
+per input: exponential in the core size $|C|$, linear in the number of periphery spins $n_u$ and couplings. "Moving a spin from the periphery into the core buys it arbitrary connectivity at the price of doubling the enumeration. This is the single design knob of an ATK, which trades classical training cost against expressivity" [@amico2026thermalizers]. A four-spin core on Z1 supports "tens of periphery spins and over a hundred boundary inputs".
+
+### The compiler is a training system
+
+Because each kernel's loss only depends on its own parameters, all kernels can be compiled in parallel. But training a kernel under the *target's* input distribution requires samples of everything upstream. Thermalizers solves this with a schedule that sounds more like a distributed system than a compiler [@amico2026thermalizers]:
+
+- Computing a kernel's gradient "already materializes a sample" from its target, so each kernel produces the inputs its children need "at no additional sampling cost".
+- Samples are stored in per-wire "bags" indexed by a *provenance* (the rollout they belong to). A gatekeeper mints new rollouts, "each kernel's training process is the only writer of its own bag, and a published entry is immutable", so "the scheme requires no locks".
+- Immutability guarantees coherent rollouts, and reusing old rollouts "does not bias the input distribution", only correlates gradient estimates.
+
+### Context matching: which inputs to optimise for
+
+A kernel with limited capacity has to decide where to be accurate. Thermalizers distinguishes three training distributions [@amico2026thermalizers]:
+
+- **Target inputs**, which the target program produces. This is the default, and it guarantees that "per-kernel residuals never amplify in propagation".
+- **Model inputs**, which the compiled program actually produces. Only these control the error floor of contracting programs. They matter when upstream kernels leak probability onto inputs the target never produces, because there a kernel trained on target inputs "was free to be arbitrarily wrong".
+- **Generic inputs** (e.g. uniform), for kernels compiled before their program is known.
+
+The recommended schedule is to train on target inputs first and switch to model inputs late. Re-optimising all kernels on model inputs is "a fixed-point iteration rather than descent on a fixed objective", and early in training it "spends capacity on input distributions that later parameters will not produce".
+
+### Kernel libraries: separate compilation and linking
+
+Common kernels can be compiled once under generic inputs and reused. The bound above guarantees their error after placement is at most $c_\ell\, \mathbb{E}_{x\sim\mu_\ell}[J_\ell]$, and "context matching after placement of the kernel within the DAG [...] can repair the mismatch". The paper compares this explicitly to quantum computing, where programs are built from "known basic gates". Which kernels deserve a library is left "as future work" [@amico2026thermalizers].
+
+::: {.callout-tip title="My take"}
+This maps almost one-to-one onto separate compilation and link-time optimisation: libraries are compiled context-free (with a provable but loose error bound), and context matching after placement is LTO, re-specialising them for the program they ended up in. The open questions are the classic ones: what's the "standard library", how do you version compiled kernels against hardware revisions, and how much does LTO buy in practice?
+:::
+
+### The global pass: trajectory-level REINFORCE
+
+Per-kernel training can't exploit errors that cancel at the output. The final pass optimises all kernels jointly against one scalar reward on the program's output, using an energy-based REINFORCE estimator that needs "only one extra 'reference' sample per factor", for "2L input-clamped thermalizations per rollout" instead of the $O(L^2)$ of a naive baseline [@amico2026thermalizers]. The authors note that their expectation of lower variance "is heuristic, as we have not measured it directly".
+
+On a biased random walk, the full pipeline of compilation, context matching and REINFORCE cuts the final error from 5.64 to 0.30 to 0.08. On a predator–prey model, though, the joint pass improved the trained window and then diverged after it, "suggesting that 'reward hacking' poses a risk even with models built from a small number of unique kernels".
+
+```{mermaid}
+%%| fig-cap: "The Thermalizers middle end as a pass pipeline. Each stage is a training procedure; the bounds of Section 2 relate their objectives."
+flowchart LR
+    a["Torx program"] --> b{"Closed form<br/>available?"}
+    b -- yes --> c["Exact lowering<br/>(e.g. PNOT: J = θ/2)"]
+    b -- no --> d["Variational compilation<br/>(per kernel, parallel)"]
+    L["Pre-compiled kernel library<br/>(generic inputs)"] --> e
+    c --> e["Context matching<br/>(target → model inputs)"]
+    d --> e
+    e --> f["Trajectory-level REINFORCE<br/>(whole program)"]
+    f --> g["Placement and schedule"]
+```
+
+::: {.callout-tip title="My take"}
+Two consequences stand out to me. First, compile time is training time, potentially with the hardware in the loop, so incremental compilation and caching become critical: recompiling a large program from scratch after a one-kernel change would be like retraining a model after editing one layer. Second, the pipeline has the same shape as LLM training (local pre-training, then global reward-based post-training), and the paper draws exactly that parallel to RLHF. That means compiler engineers can borrow from ML engineering (checkpointing, experiment tracking, regression testing of trained artifacts) more than from traditional compiler infrastructure.
+:::
+
+## 5. The back end: mapping onto the chip
+
+### The target machine
+
+Z1's graph is fixed in silicon. Each node at $(x, y)$ connects to the four nodes generated by each of the connection rules $(1,0)$, $(2,1)$, $(2,3)$ and $(4,1)$, giving degree 16, and "all edges are short, with the longest having Euclidean length $\sqrt{17} \approx 4.1$ grid units". The graph is two-colourable, so one sweep is two parallel half-sweeps. Besides sampling, the chip supports three operations with very different costs [@amico2026thermalizers]:
+
+- **Readout** of node states, costing "about as much energy as $10^2$–$10^3$ Gibbs iterations".
+- **Coupling flashing**, i.e. loading new couplings and biases, which is "significantly more expensive than readout".
+- **Clamping** nodes, "about as expensive as coupling flashing".
+
+The chip is efficient "as long as coupling re-flashing is infrequent (no more than about once per second)". If I may stretch an analogy: Gibbs sweeps behave like cheap ALU operations, reads like loads, and flashes like a context switch.
+
+### Placement and embedding
+
+Mapping logical spins onto the fixed graph is a minor-embedding problem: a logical spin that needs more connections than the hardware offers becomes a chain of strongly coupled p-bits. In the Gaussian demonstration, 336 logical spins with 3,140 couplings occupy 1,774 p-bits, "on chains of length up to 18". Chain lengths differ by layer, averaging 2.9 p-bits in the fine layer versus 13.3 in the medium layer, and "layout can push chain lengths toward the fine layer's 2.9-p-bit average". That matters because "the loop is sampling-bound" [@amico2026thermalizers].
+
+The graph's bipartite structure also imposes a hard limit independent of any coupling cap. When compiling a three-body interaction, "a spin that is simultaneously a pairwise neighbor and a three-body partner of site n needs both an affine edge to the output and a bilinear edge to a hidden spin, and on a bipartite graph it cannot keep both". So "topology and cap act as two independent sources of compilation error".
+
+The paper's own conclusion is that placement should be decided *together* with training: "connectivity-aware compilation, where the placement of input, hidden, and output spins on the actual hardware graph is optimized together with the kernel parameters so that topology residuals can be measured and reduced rather than treated after the fact" [@amico2026thermalizers].
+
+::: {.callout-tip title="My take"}
+This is a phase-ordering problem in its purest form. In a classic back end, instruction selection, register allocation and scheduling interact, but each phase is still deterministic and cheap. Here, the "instruction selection" (training kernel parameters) depends on the placement, and the quality of a placement can only be judged after training. Approaches from FPGA place-and-route (iterative placement with timing feedback) and from quantum compilers (qubit mapping and routing) are the natural starting points, with the twist that the "timing" being optimised is a statistical error.
+:::
+
+### Scheduling: colouring, Trotterisation and sweep counts
+
+Parallel updates must never touch two coupled spins at once, so scheduling is graph colouring. Z1's two-colour structure gives the basic chromatic sweep. At the program level, Torx uses colouring to group commuting generators: for updates tiled over the edges of a graph, an edge colouring reduces the number of Trotter groups to the edge chromatic number $\chi'(G)$ [@verdon2026torx].
+
+Trotterisation (approximating the evolution under a sum of local generators by a product of local steps) adds a choice of numerical method. Torx works it out: Lie–Trotter splitting has global error $O(t^2k^2/N)$; Strang splitting has $O(t^3k^3/N^2)$ "at the cost of $2k-1$ rather than $k$ gate applications per step"; and "when only Euler kernels $I + Q_j\tau$ are available, [...] Lie–Trotter is simpler and sufficient" [@verdon2026torx].
+
+Some scheduling decisions can even be postponed to run time. For compiled Gibbs samplers, "compilation itself is schedule-independent, since each kernel is compiled once from its blanket conditional and the same compiled kernels run under any schedule, making the schedule a runtime choice rather than a property of the couplings" [@amico2026thermalizers].
+
+The remaining parameters are resource counts: how many sweeps per kernel, how many parallel chains, how many samples. The experiments pick them by hand, e.g. "K = 30 block-Gibbs sweeps" per layer for the random walk, or "120 warm-up and 300 measured sweeps across 12 Gibbs chains" per step for the Gaussian design loop [@amico2026thermalizers].
+
+### A cost model
+
+To make those decisions automatically, a compiler needs a cost model. The Thermalizers paper provides the ingredients: SPICE-based estimates of 7.09 fJ per p-bit per Gibbs update, 1.692 pJ to read one p-bit off-chip and 153.6 pJ to rewrite one p-bit's parameters, "excluding the host's contributions" [@amico2026thermalizers]. The toy model below is mine; only its three constants come from the paper.
+
+```{ojs}
+viewof logM = Inputs.range([2, 5.4], {value: 4, step: 0.1, label: "log₁₀ active p-bits"})
+```
+
+```{ojs}
+viewof logK = Inputs.range([0, 4], {value: 2, step: 0.1, label: "log₁₀ sweeps per sample"})
+```
+
+```{ojs}
+viewof logS = Inputs.range([0, 6], {value: 3, step: 0.1, label: "log₁₀ samples"})
+```
+
+```{ojs}
+viewof logR = Inputs.range([0, 5], {value: 2, step: 0.1, label: "log₁₀ p-bits read per sample"})
+```
+
+```{ojs}
+viewof flashes = Inputs.range([0, 100], {value: 1, step: 1, label: "Full re-flashes"})
+```
+
+```{ojs}
+//| label: fig-cost
+//| fig-cap: "Toy energy model for one job on a Z1-like chip: sweeps × active p-bits × 7.09 fJ, plus reads × 1.692 pJ, plus re-flashes × active p-bits × 153.6 pJ. Constants are SPICE-based estimates from Amico et al. (2026), Table IV, excluding host and interface overheads; the model itself is my simplification."
+{
+  const M = 10 ** logM, K = 10 ** logK, S = 10 ** logS, R = 10 ** logR;
+  const parts = [
+    {part: "Gibbs sweeps", J: M * K * S * 7.09e-15},
+    {part: "Readout", J: R * S * 1.692e-12},
+    {part: "Re-flashing", J: flashes * M * 153.6e-12},
+  ];
+  const total = d3.sum(parts, d => d.J);
+  const fmt = j => j >= 1e-3 ? (j * 1e3).toPrecision(3) + " mJ" : j >= 1e-6 ? (j * 1e6).toPrecision(3) + " µJ" : (j * 1e9).toPrecision(3) + " nJ";
+  return Plot.plot({
+    width: 640,
+    marginLeft: 100,
+    x: {label: `Share of total energy (total ≈ ${fmt(total)}) →`, domain: [0, 1], tickFormat: "%", grid: true},
+    y: {domain: parts.map(d => d.part), label: null},
+    marks: [
+      Plot.barX(parts, {x: d => d.J / total, y: "part", fill: "#00bc8c"}),
+      Plot.text(parts, {x: d => d.J / total, y: "part", text: d => fmt(d.J), dx: 6, textAnchor: "start"}),
+    ]
+  });
+}
+```
+
+Even this crude model shows the shape of the optimisation problem: depending on the job, sampling, readout or re-flashing dominates, and each is controlled by a different compiler decision (sweep counts and chain sizes, what to read back, how to batch work so the couplings stay resident).
+
+### The CN101 back end: tiling, windows and operating points
+
+Normal's chip poses a different but equally interesting back-end problem [@holdijk2026cn101]:
+
+- **Tiling and pinning.** Layers larger than 64 × 64 are split into blocks across tiles and chips, much like GPU tiling. For the CIFAR-10 flow, the ten weight matrices are "pinned one to a tile across the six CN101 chips", with "two further tiles reallocated to share the busiest layers' pixel streams". Because the same matrices recur at every integration step, tiles are reused: "This reuse bounds throughput, but it does not serialise the relaxation."
+- **Operator lowering.** CN101's "only operation is a 64 × 64 matrix multiply with no direct native support for convolutions", so each convolution becomes "a host-side shift followed by an on-chip 1 × 1 convolution".
+- **Windows and synchronisation.** Across chips, the host exchanges running estimates "window by window"; "the sync interval Δ can be chosen between fully sequential execution and the fully concurrent regime Δ = 1".
+- **Operating points.** For each cycle budget $T$, the paper searches "the chip's two configurable knobs that do not change the trained model: the input scale applied to each tile and the weight-register precision".
+
+One CN101 result has direct consequences for how such a compiler should think about precision. When dependent layers relax concurrently, the CIFAR-10 image reaches its target quality in "some 62× fewer" cycles than layer-by-layer execution. At the moment the image first becomes good, "the layers in the middle of the network still carry 20–70% per-tile error against the floating-point reference". The paper's summary: "Sequential parallelism thus allocates precision automatically to where it reaches the output and spends none where it does not."
+
+::: {.callout-tip title="My take"}
+For CN101, the operating-point search is autotuning, and it's currently done per experiment. The concurrency result is even more interesting for compiler design: it says per-layer accuracy targets are the wrong abstraction. A CN101 compiler should optimise an end-to-end error budget and let intermediate stages be as sloppy as the output tolerates, which is the same conclusion the Thermalizers bounds lead to from a completely different direction.
+:::
+
+## 6. Partitioning: what runs where
+
+No thermodynamic chip runs a whole application. Something has to decide which parts run on the chip and which on a host, FPGA or GPU, and the published numbers show that this decision can dominate everything else:
+
+- In Extropic's Z1T language-model estimates, "the FPGA consumes the vast majority (>95%) of the energy". It "adds each block's input back around the attention and MLP transforms" and "runs the vocabulary readout that produces the logits", while Z1 samples the next token [@extropic-z1t-post].
+- When a CN101 model spans several chips, "the chip evaluates the 64 × 64 matmuls and the host applies the bias, normalisation, activation and any integration step between windows" [@holdijk2026cn101].
+- Torx defines a "Tier 3" for operations that need "measurement and classical feedback": sample a continuous wire, evaluate an arbitrary function classically, feed the result back. It "incurs the round-trip latency cost of each measurement and classical evaluation", so "this compilation strategy is reserved for state-dependent nonlinearities that cannot be approximated by a finite mixture within the application accuracy budget" [@verdon2026torx].
+
+That last rule is a genuine compiler heuristic: *offload to the host only if the on-chip approximation doesn't fit the error budget*.
+
+::: {.callout-tip title="My take"}
+Generalised, this is heterogeneous partitioning under an accuracy constraint: assign each operation to chip, FPGA or host so that total energy (including I/O, which the cost model above shows can dominate) is minimal while the end-to-end error stays within budget. ML compilers solve the deterministic version of this every day (which ops go to the accelerator, which fall back to the CPU). Adding the error dimension, and the very asymmetric costs of reading and re-flashing, makes it a much richer problem. Given that the FPGA, not the thermodynamic chip, dominates Z1T's energy, I'd argue this is where the largest *system-level* gains are hiding.
+:::
+
+## 7. The missing tooling
+
+Here's what exists today. As of October 2026, two parts of Extropic's stack are open source under the Apache-2.0 licence, [THRML](https://github.com/extropic-ai/thrml) (also on PyPI) and [Torx](https://github.com/extropic-ai/torx), and Extropic publishes an official [agent skill](https://github.com/extropic-ai/thrml-skill) for writing THRML code. The Thermalizers compiler itself is described in its paper, but I couldn't find a public repository for it yet. According to the papers:
+
+- **Torx**, with three software backends (SampleSimulator, HybridSampleSimulator and StateVectorSimulator) and a hardware backend that sources randomness from X0 p-bits [@verdon2026torx].
+- **THRML**, used for all Thermalizers experiments "with THMs simulating realistic hardware by matching the topology of the Z1 thermodynamic computer" and its coupling caps [@amico2026thermalizers].
+- **Thermalizers** itself: variational compilation, context matching and REINFORCE post-training.
+- On Normal's side, the CN101 deployment recipe and evaluation flow described in the paper [@holdijk2026cn101].
+
+What follows is what I think is missing. Each item is grounded in a limitation or open question the papers themselves state.
+
+### Statistical testing
+
+You can't unit-test a sampler with `assert_eq`. Exact simulation propagates a probability vector of size $2^n$, so it is "primarily useful for small-scale prototyping" [@verdon2026torx]. Beyond that, the Thermalizers authors stress that error mitigation does "not remove the need to validate each application against its own task-level observable" [@amico2026thermalizers].
+
+::: {.callout-tip title="My take"}
+What's needed is a test framework built on hypothesis tests: specify the expected distribution or statistic, a tolerance and a false-alarm rate, and let the framework compute how many samples it needs. It also has to account for autocorrelation. In the Gaussian demonstration, a lag-one autocorrelation of 0.53–0.76 sets the effective sample size [@amico2026thermalizers], and a naive test would massively overestimate its confidence.
+:::
+
+### Error attribution: a profiler for wrongness
+
+A classic profiler tells you where time goes. Here you need to know where *error* comes from. The Thermalizers paper lists three sources of compilation residual (hypothesis-class limits, optimisation residual and sampling bias of unmixed phases) and asks that hardware validation "separate compilation residuals from execution error, finite thermalization, calibration drift, and readout overhead" [@amico2026thermalizers]. Its Gaussian demonstration is a manual example of such an attribution: compilation error zero, discretisation error by bit width, Monte Carlo floor by sample count, and embedding error deferred.
+
+::: {.callout-tip title="My take"}
+That manual budget should be a tool: run the program, then report the error contributed by each kernel and each source, the way `perf` reports cycles per function. Because the bounds of Section 2 are additive, much of this attribution has a principled basis.
+:::
+
+### Mixing diagnostics
+
+Slow mixing is silent: the output looks plausible. In the Gaussian design loop, the posterior variance at the first step is off by 41% because "the posterior is broad and the chain mixes slowly", which washes out once the field is constrained [@amico2026thermalizers]. The Normal paper names mixing its "principal open question" [@holdijk2026cn101].
+
+::: {.callout-tip title="My take"}
+A debugger for this hardware needs mixing diagnostics per kernel (autocorrelation estimates, multi-chain agreement, warnings when a kernel's couplings get large enough to trigger the mixing–expressivity trade-off), and the compiler should be able to insert the monitoring automatically.
+:::
+
+### Debugging by observation, and deterministic replay
+
+Here, thermodynamic hardware has a real advantage over quantum computers. In a stochastic circuit, "drawing a sample does not alter the distribution, so one can take measurements at any point in the circuit without affecting the remainder of the computation" [@verdon2026torx]. In other words, `printf` debugging works, at least logically. On Z1 each readout still costs energy and time. And because Torx can swap the randomness provider without changing the circuit, and CN101 uses seeded generators "verified to produce non-overlapping sequences across neurons and across runs" [@holdijk2026cn101], deterministic replay is possible in simulation.
+
+::: {.callout-tip title="My take"}
+Put those two properties together and you get a debugger workflow: reproduce a suspicious hardware run in the simulator with recorded seeds, then probe intermediate wires freely. What's missing is the tool that does this, including tracing which hardware run used which compiled artifact, calibration data and seeds.
+:::
+
+### Calibration-aware compilation
+
+Devices differ. X0 p-bits are calibrated individually with "typical per-site calibration errors around 5% in absolute probability" [@verdon2026torx]. Thermalizers can run its training "with the hardware itself in the loop, which absorbs part of the execution error into the trained parameters", and model-context matching on hardware absorbs upstream "finite-horizon readout and calibration drift" [@amico2026thermalizers].
+
+::: {.callout-tip title="My take"}
+That makes compiled artifacts potentially device-specific. The toolchain needs a device database (calibration data per chip and date), a way to recompile or re-tune cheaply when calibration drifts, and a policy for when a compiled program is still valid on another chip. Quantum cloud providers face the same problem with daily calibration data; borrowing their workflows seems sensible.
+:::
+
+### Benchmarks and honest reporting
+
+The Torx demonstrations are deliberately "sized to showcase the capabilities that a PSC can express rather than to show an efficiency or scalability advantage" [@verdon2026torx], and all Thermalizers results run in a simulator. The authors themselves insist that "simulator results, calibrated hardware-model projections, and physical hardware measurements should remain distinct when interpreting the evidence" [@amico2026thermalizers].
+
+::: {.callout-tip title="My take"}
+The field needs a shared benchmark suite with workloads at realistic sizes, fixed accuracy targets and a mandatory label on every number: *simulated*, *projected* or *measured*. Without it, compiler improvements can't be compared, and hardware claims can't be checked.
+:::
+
+### The tooling map
+
+| Tool | Exists today | Missing | Grounded in |
+|---|---|---|---|
+| Frontend / IR | Torx PSCs, DFGs | Explicit lower levels, invariant checking | Torx, Thermalizers |
+| Lowering | Variational compilation, closed forms, ATKs | Rule tables, caching, incremental compilation | Thermalizers |
+| Libraries | Concept of pre-compiled kernels | Standard library, versioning | Thermalizers (future work) |
+| Placement | Minor embedding (manual in demos) | Connectivity-aware joint optimisation | Thermalizers (future work) |
+| Cost model | Per-operation energy estimates | Automatic sweep/readout/flash planning | Thermalizers App. B |
+| Partitioning | Manual (FPGA/host splits) | Error- and I/O-aware partitioner | Z1T, CN101, Torx Tier 3 |
+| Testing | Exact simulation for tiny circuits | Statistical test framework with ESS | Torx, Thermalizers |
+| Profiling | Manual error budgets | Error attribution per kernel and source | Thermalizers |
+| Debugging | Simulators, swappable randomness | Replay, wire probes, mixing diagnostics | Torx, CN101 |
+| Calibration | Per-p-bit calibration on X0 | Device database, drift-aware recompilation | Torx, Thermalizers |
+| Benchmarks | Toy and simulated demos | Shared suite with simulated/projected/measured labels | Torx, Thermalizers |
+
+## 8. Where the biggest opportunities are
+
+::: {.callout-tip title="My take"}
+If I had to rank where compiler work could matter most, this would be my list:
+
+1. **Error-aware compilation as a discipline.** The theory for error budgets exists in the Thermalizers paper. Turning it into compiler infrastructure (budgets as IR attributes, passes that spend them, certificates computed by exact enumeration where kernels are small enough) is engineering, not research, and it would make every other optimisation safer.
+2. **Joint placement and training.** The authors name connectivity-aware compilation as future work, and the Gaussian demo shows how much chain lengths vary. It's the hardest phase-ordering problem in the stack and probably the one with the biggest effect on how much fits on a chip.
+3. **Kernel synthesis theory.** Torx explicitly lists "a general theory of synthesizing a target kernel from a fixed gate set" as open. In compiler terms this is instruction selection for stochastic machines, and having a theory, not just a training loop, would make lowering faster and more predictable.
+4. **I/O- and error-aware partitioning.** The >95% FPGA share in Z1T is a strong hint that the system-level bottleneck isn't the sampler. A partitioner that minimises total energy including I/O could matter more than any improvement to the chip itself.
+5. **Testing and debugging infrastructure.** Without statistical tests, error profilers and mixing diagnostics, every other improvement is hard to verify. Since samples can be observed without disturbing the computation, the foundations are friendlier than in quantum computing.
+6. **Borrowing from quantum compilation.** Both papers lean on the analogy themselves: gate-based IRs, Trotterisation, pre-compiled gate sets, calibration-aware mapping. A decade of quantum compiler work (circuit IRs, qubit routing, noise-aware mapping) is directly reusable, with the caveat that the cost functions are statistical rather than about decoherence.
+:::
+
+## Wrapping up
+
+A compiler for a thermodynamic computer has to do everything a classic compiler does: parse a high-level program, lower it through intermediate representations, select primitives, place and schedule them, and partition work across heterogeneous hardware. But almost every step changes character:
+
+- **Correctness** becomes an error budget rather than an equivalence.
+- **Lowering** becomes training.
+- **Placement** feeds back into what the "instructions" are.
+- **Testing** becomes statistics.
+
+The foundations are there. Torx provides a principled IR, Thermalizers a lowering with provable error accounting, and CN101 shows that standard neural networks can be mapped onto a digital thermodynamic chip with a few clear knobs. What's missing is most of what turns a research prototype into a toolchain people can trust: infrastructure, automation and tooling. For a compiler engineer, that's a reason to start now rather than wait for the hardware.

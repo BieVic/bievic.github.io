@@ -1,0 +1,182 @@
+---
+title: "How many sweeps is enough?"
+date: 2026-10-27
+draft: true
+description: "thermir can now bound how long a minor-embedded sampler has to run, where the textbook mixing certificate gives up. A decomposition along the chains, a lemma I had to prove twice, a proof I couldn't finish and didn't need, one assumption I measured instead of proving, and what all of it does to how chains should be built."
+categories: [compilers, thermodynamic-computing, mcmc]
+bibliography: thermodynamic-compilers.bib
+echo: false
+---
+
+The [last post](2026-10-26-thermir.qmd) ended with the biggest hole in thermir. The compiler could bound how far a sampler's *stationary* distribution is from its target, at any size. But for most samplers worth running on sparse hardware it couldn't say how many sweeps it takes to get there. Those samplers fell back to exact planning (up to 8 nodes) or to simulation estimates with a warning label.
+
+This post is about closing most of that hole. Same caveats as before: simulators, small models for the exact checks, made-up devices. Every number comes from scripts in the [thermir repository](https://github.com/BieVic/thermir) (the prototypes are under `prototypes/mixing/`).
+
+## Why chains break the old certificate
+
+A read of a sampler after $K$ sweeps has two kinds of error. One is how far the sampler's stationary distribution is from the target, which thermir certifies. The other is how far the state after $K$ sweeps still is from that stationary distribution, which depends on how fast the chain mixes. The compiler picks $K$ so the two together fit the budget.
+
+For the mixing part thermir used Dobrushin's condition [@dobrushin1970]. For every spin, add up how much each neighbour can move its conditional distribution: a coupling $J$ contributes at most $\tanh(\beta |J|)$. If every such sum stays below 1, say at $\alpha$, then two copies of the sampler started anywhere agree after $K$ sweeps except with probability $n\,\alpha^K$. That's cheap, local and sound.
+
+Minor embedding breaks it by design. When a spin becomes a chain of device nodes, the nodes are coupled strongly so that they agree. A node in the middle of a chain has two chain neighbours, each contributing $\tanh(\beta c)$, which is close to 1 for any useful chain strength $c$. So $\alpha \ge 1$, and the certificate says nothing. Weaker chains don't help either, because then the chains break and almost every sample is thrown away. In the 24 small chained samplers I started with, Dobrushin's condition was vacuous in 16. On the benchmark embeddings from the scaling post it was vacuous in five of six.
+
+## Think of a chain as one spin
+
+The idea that made progress possible is old [@martinelli1999lectures]: split the dynamics in two. Imagine a slower sampler that resamples a whole chain at once, given everything else. Its gap, a measure of how fast it forgets where it started, bounds the real sampler's gap from below, after multiplying by the slowest chain's own gap with its surroundings frozen:
+
+$$
+\text{gap}(\text{node by node}) \;\ge\; \text{gap}(\text{chain by chain}) \cdot \min_{\text{chains}} \text{gap}(\text{inside one chain}).
+$$
+
+The nice part is the first factor. When you resample a whole chain, the chain strength doesn't matter any more: one chain influences another only through the couplings between them, which are the logical model's couplings. So the chain-by-chain dynamics passes Dobrushin's condition exactly when the *logical* model does, however strong the chains are. Using the spectral radius of the influence matrix instead of its row sums covers some more models.
+
+I tested this before building anything. On samplers of up to 11 nodes I can compute the true number of sweeps exactly, so I could check the bound against the truth. On 64 chained samplers it was never below the truth, and it was 7 to 55 times above it (median 12.8×). It also grew with chain strength the way the truth does, which a bad bound wouldn't.
+
+## The inner gap, twice
+
+The catch was the second factor. "The gap inside one chain, with everything around it frozen" needs enumerating the chain's states and every boundary configuration. A chain of 40 nodes is out of reach.
+
+My first attempt bounded it at zero field and then corrected for the fields with a standard perturbation bound (Holley–Stroock). It was valid and useless: 200 to 9,000 times too loose, because the correction grows exponentially with the total field on the chain, and every logical coupling counts as a field on the chain.
+
+What worked is canonical paths [@diaconis1991geometric]. To show that a Markov chain mixes fast, route every pair of states along an explicit path and check that no single transition carries too much of the traffic. For a chain, fix an order of its nodes and flip them in that order. The traffic through a transition then depends only on the bonds that cross the "frontier" of that order, between the nodes already flipped and the rest, and the fields drop out of the argument completely. The result, which I called the **Frontier Lemma**:
+
+$$
+\text{gap}(\text{inside one chain}) \;\ge\; \frac{e^{-4\beta W}}{m}
+$$
+
+for a chain of $m$ nodes, **for any fields**, where $W$ is the largest total bond weight across the frontier. For a path, $W$ is the chain strength $c$; every branch adds to it. That made the whole bound computable from the model in linear time, and it held on every case I threw at it. The sweep counts it gave were 24 to 394 times the truth.
+
+One thing bothered me. For a path I had a sharper form, $e^{-2\beta c}$ instead of $e^{-4\beta c}$. And when I measured branched chains, they slowed down like $e^{-2\beta c w}$, with $w$ the number of bonds across the frontier. So the lemma lost a factor of 2 *in the exponent*. That's harmless at weak coupling, but at $\beta c = 4$ and a frontier of two bonds it's $e^{16}$, about nine million.
+
+It took a while to find where the factor went. When the order flips node $k$, the bonds across the frontier split three ways: from the flipped nodes to $k$, from $k$ to the rest, and bonds that skip $k$ and go straight from the flipped nodes to the rest. The proof handled the first two exactly. The skipping bonds it bounded crudely, in four places. The fix was to bound the partition function from below by only the states where those bonds are satisfied. That costs a probability (that a few nodes agree with $k$), not an exponential. That probability depends on the fields, so I needed it to be uniformly bounded. In a ferromagnet the probability of an "everything agrees" event only grows with fields pointing the right way [@fortuin1971fkg], so the worst case sits at a known corner of the field box and can be computed exactly. The new bound pays $e^{2\beta \cdot \text{cut}}$, like the truth.
+
+```{ojs}
+//| label: fig-inner-gap
+//| fig-cap: "How far below the exact gap the two versions of the Frontier Lemma sit (median of exact gap ÷ bound, log scale), on 150 random chains of up to 8 nodes, with field budgets up to 1, checked at every corner of the field box. No bound was ever above the exact gap."
+{
+  const data = [
+    {set: "trees", lemma: "first version, e^{-4βW}", ratio: 76.5},
+    {set: "trees", lemma: "second version, e^{-2βW}", ratio: 5.3},
+    {set: "with cycles", lemma: "first version, e^{-4βW}", ratio: 438},
+    {set: "with cycles", lemma: "second version, e^{-2βW}", ratio: 26.6},
+    {set: "strong chains (βc ≥ 2)", lemma: "first version, e^{-4βW}", ratio: 19200},
+    {set: "strong chains (βc ≥ 2)", lemma: "second version, e^{-2βW}", ratio: 8.2},
+  ];
+  return Plot.plot({
+    width: 640,
+    marginLeft: 150,
+    marginRight: 60,
+    x: {type: "log", label: "Exact gap ÷ bound (median) →", domain: [1, 100000], grid: true},
+    y: {label: null, domain: ["first version, e^{-4βW}", "second version, e^{-2βW}"], axis: null},
+    fy: {label: null, domain: ["trees", "with cycles", "strong chains (βc ≥ 2)"]},
+    color: {legend: true, domain: ["first version, e^{-4βW}", "second version, e^{-2βW}"], range: ["#f2a541", "#00bc8c"]},
+    marks: [
+      Plot.barX(data, {x1: 1, x2: "ratio", y: "lemma", fy: "set", fill: "lemma", inset: 2}),
+      Plot.text(data, {x: "ratio", y: "lemma", fy: "set", text: d => d.ratio >= 100 ? d.ratio.toLocaleString("en-US") + "×" : d.ratio + "×", dx: 6, textAnchor: "start"}),
+    ]
+  });
+}
+```
+
+Chains on a king's graph often contain triangles, so the compiler can't assume trees. It computes those probabilities with a small dynamic program along the order, over a table of the nodes still on the frontier. That works for any chain whose frontier stays under 20 nodes, which is all of them in practice.
+
+## The proof I couldn't finish, and didn't need
+
+The gap is only half of a mixing bound. The other half is where you start. The standard bound pays $\tfrac12 \ln(1/\pi(x_0))$ for a start $x_0$, and if you don't know the start you pay for the worst state. For a chained sampler the worst state has a broken bond, a "wall", in every chain, each costing $2\beta c$. So that term grows with the number of chain bonds. On the benchmark embeddings it was the larger part of the sweep count.
+
+The obvious fix is a two-phase argument: walls disappear quickly, then the spectral bound takes over from a state without walls. I simulated isolated chains, found that walls diffuse out in about $0.1\,L^2$ sweeps independent of the chain strength, wrote that down as a "burn-in conjecture", and estimated it would make the bound 2.4 to 6.9 times tighter. Then I sat down to prove it, and the proof kept getting longer: the hardware's chromatic sweeps move walls differently from random updates, walls annihilate each other, and chains branch.
+
+Before investing more, I simulated the actual embeddings, whole sampler, real fields, and counted walls. Equilibrium on those embeddings *has* walls, on about a quarter of the chain bonds (18 of 67 on one, 57 of 142 on another). Every start I tried, including one with every chain alternating, reached that count **in one sweep**. There was nothing to burn in. The diffusion I'd simulated was real, but only for strong, isolated chains, which isn't what the compiler builds. And my 2.4–6.9× estimate had assumed a start without walls, which equilibrium doesn't even have.
+
+What worked instead was skipping the question: **choose the start**. If the device program loads every chain aligned before sampling (a new `dev.flash @s aligned`), the start is known. Its probability can be bounded without enumeration, by expanding the partition function in broken chain bonds. That's a theorem, checked against exact enumeration on 60 small samplers, and it makes the start term 1.8 to 2.7 times smaller on the benchmark embeddings. The same expansion gives a lower bound on the share of samples with all chains aligned, which the certificate needs too. The proof that didn't work was answering a question nobody needed answered.
+
+The catch is that this is a requirement on the hardware, not a theorem about it. THRML can load a state. For the analog devices I don't know yet.
+
+## Sweeps are not continuous time
+
+Everything above is about continuous-time Glauber dynamics, where every node gets resampled at random times, once per unit of time on average. That's the setting where the proofs work. The hardware runs sweeps instead: update groups in a fixed order, each group resampled at once.
+
+The two are known to differ, sometimes by polynomial factors in contrived models [@he2016scan]. I could prove one bridge between them, and it's no use: it loses a factor of the largest update group, which comes to 830 to 2,370 times on the benchmark embeddings. What I could do was measure:
+
+```{ojs}
+//| label: fig-sweeps
+//| fig-cap: "Sweeps a sampler needs to mix (worst start, TV 0.01), divided by the continuous time the proofs bound, computed exactly. Bars span the smallest to the largest ratio, dots mark the median. Below 1 means a sweep is worth more than one unit of continuous time."
+{
+  const data = [
+    {set: "296 random models", min: 0.20, median: 0.50, max: 0.66},
+    {set: "74 adversarial ones", min: 0.38, median: 0.50, max: 0.67},
+    {set: "24 compiled chained samplers", min: 0.44, median: 0.50, max: 0.51},
+  ];
+  return Plot.plot({
+    width: 640,
+    marginLeft: 200,
+    x: {label: "Sweeps ÷ continuous-time bound →", domain: [0, 1.1], grid: true},
+    y: {label: null, domain: data.map(d => d.set)},
+    marks: [
+      Plot.ruleX([1], {strokeDasharray: "4,4", stroke: "currentColor"}),
+      Plot.barX(data, {x1: "min", x2: "max", y: "set", fill: "#00bc8c", fillOpacity: 0.35, inset: 6}),
+      Plot.dot(data, {x: "median", y: "set", fill: "#00bc8c", r: 5}),
+      Plot.text(data, {x: "max", y: "set", text: d => `max ${d.max}`, dx: 8, textAnchor: "start"}),
+    ]
+  });
+}
+```
+
+Not once above 0.67. The adversarial set has stars, frustrated rings, dense mixed-sign graphs and both group orders, the kind of models where scan order is supposed to bite. At sizes I can't enumerate, I compared how fast the magnetisation decays: a sweep was 1.6 to 2.5 times faster than a unit of continuous time on grids up to 100 nodes, and on chained grids up to 108 nodes with chains strong enough that mixing took thousands of sweeps. A factor of about 2 is what numerical analysis predicts for two-colourable Gaussian models: Gauss–Seidel against Jacobi.
+
+So the compiler uses it, and says so. A read that's held to its budget only because of this step is labelled:
+
+```mlir
+dev.program @run.dev() attributes {thermir.assumes_unit_time, thermir.certified_tv = 1.0, thermir.checked_tv = 0.1995, ...} {
+  dev.flash @k4_chromatic aligned
+  dev.sweep 950
+  %0 = dev.read retry {thermir.assumed_tv = 0.1995, thermir.assumes_unit_time, thermir.certified_tv = 1.0, ...} : !prog.spins<4>
+  dev.yield %0 : !prog.spins<4>
+}
+```
+
+`certified_tv` stays 1, because nothing unconditional covers this read. `assumed_tv` is the bound with the assumption, and the error report marks the row `assumed` with one line explaining what that means. `assume_unit_time=False` refuses it, and the compile then fails like before.
+
+Last time I wrote that an estimate never holds a budget. This is a third category between a certificate and an estimate: a bound that holds if one stated thing is true, where that thing has been measured with a margin. I'd rather have the label than either pretend it's a theorem or throw away a bound that holds everywhere I've looked.
+
+## Chains built for the certificate
+
+Once the compiler plans sweeps from this bound, the chains themselves change what the device does. A chain of frontier width $w$ costs $e^{-2\beta c w}$ in the gap, while a broken chain costs a rejected read, and a rejected read reruns all its sweeps. The old default, the strongest coupling the device allows on every chain, is the worst possible choice for branched chains on a device that allows strong couplings.
+
+So for samplers too large to plan exactly, `--ebm-place` now picks the coupling of each chain to minimise the certified sweeps per kept read. Paths stay strong and branched chains get weaker. It uses the same cost to pick among the embeddings its random attempts produce, instead of keeping the one with the fewest nodes. On the benchmark embeddings, on devices that allow different chain strengths:
+
+| Embedding | $\beta\,c_\text{max}$ | Sweeps per kept read, old default | Chosen | Kept |
+|---|---|---|---|---|
+| random, 50 spins, king's graph | 2 | 2.6·10⁵ | 2.2·10⁵ | 18% |
+| random, 50 spins, king's graph | 4 | 4.1·10⁶ | 1.6·10⁵ | 42% |
+| lattice, 49 spins, Chimera | 2 | 3.5·10⁷ | 2.8·10⁶ | 4% |
+| lattice, 49 spins, Chimera | 4 | 1.5·10¹⁰ | 7.9·10⁵ | 23% |
+| random, 100 spins, Chimera | 4 | 3.6·10¹⁰ | 2.8·10⁶ | 23% |
+
+The share kept comes from an estimate the compiler uses to rank candidates, and it matched an independent simulation within 2% on these models.
+
+Two rows of this table weren't in my plan. The first is the one *not* shown: on the scaling benchmark's own devices ($\beta c_\text{max} = 0.5$), the choice changes nothing, because chains that weak keep maybe $10^{-14}$ of reads whatever you do. Those embeddings were never usable, certificate or not. The compiler can say that now, which it couldn't before.
+
+The second is a small one. K4 on a 3×3 grid needs chains on 9 nodes. At the default coupling the chain bound plans 950 sweeps, with the assumption. The chooser instead made the chains weak, 0.32, weak enough that plain Dobrushin holds on the nodes: 28 sweeps, certified without any assumption, even though only 12% of reads are kept. Per kept read that's about 6.6 times cheaper. I hadn't expected the tuner to find its way back to the old certificate.
+
+## Something that broke on the way
+
+Running `--ebm-diagnose` on a strongly chained 177-node sampler crashed the compiler. When a sampler hadn't mixed, the code computing its acceptance indexed the stored samples by sweep number, but the stored samples are thinned after the first 2,048. It read past the end of an array. Small samplers mix fast and never got there. Same lesson as last time: the tests have to reach the regime where things break.
+
+::: {.callout-tip title="My take: what surprised me"}
+1. **The hard proof was for the wrong question.** I spent more time on the burn-in lemma than on anything else here, and the answer was to load a state. Simulating the real system first would have saved that time.
+2. **A labelled assumption beats both alternatives.** Proving the sweep comparison properly is beyond me for now. Dropping the bound because of that gap would have left every chained sampler uncertified.
+3. **Once a certificate exists, it starts designing things.** Chain couplings and embeddings were tuning knobs. Now they're chosen to make the certificate small, and that pushes towards the same thing the hardware wants anyway: short, path-shaped chains.
+:::
+
+## Limitations
+
+- **Still loose.** On the one benchmark model where simulation mixed well enough to compare, the planned sweeps are roughly 15 to 40 times what simulation suggests. Small exact cases are tighter (the gap bound is a median 9 times below the exact gap), but the constants add up.
+- **Higher-order terms are not covered.** The gadget spins that implement them sit between chains with couplings that cancel in aggregate, and every bound in this post adds influences up as if they didn't cancel. Those samplers still run on estimates.
+- **One assumption.** The sweep comparison is measured, not proved. The margin looks comfortable, but it's a margin over the cases I tried.
+- **Small exact checks, simulated hardware.** The exact validation stops at 11 nodes. The scale results are simulations of made-up devices. The aligned start needs hardware that can load a state.
+- **Dense logical models.** Two of the benchmark models still need over a million certified sweeps on strong devices. The bound pays for how strongly the logical spins influence each other, and these models are close to the edge.
+
+## What's next
+
+The next step is **certificates for higher-order terms**, the last piece of the compiler that runs entirely on estimates. Bounding the gadget spins properly needs paths that move a spin together with its gadgets, not one node at a time. That's a different proof, and I don't know yet whether it works. In parallel there are smaller wins: a sharper Dobrushin bound for unchained samplers that follows the hardware's own sweep order, and tighter certificates for the terms themselves.

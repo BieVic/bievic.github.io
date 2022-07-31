@@ -1,0 +1,42 @@
+---
+title: "About me"
+image: assets/images/headshot.jpg
+toc: false
+about:
+  template: trestles
+  image-shape: round
+  links:
+    - icon: github
+      text: GitHub
+      href: https://github.com/bievic
+    - icon: linkedin
+      text: LinkedIn
+      href: https://www.linkedin.com/in/victor-bieszka-a567ba151
+    - icon: envelope
+      text: Email
+      href: mailto:victorbieszka@gmail.com
+---
+
+I'm a software engineer in Hamburg who likes to understand how things work all the way down: from programming languages and compilers to the hardware that finally runs the code. I mostly write C++ and Python, and I spend my time on compiler technologies, WebAssembly and systems programming.
+
+## What I'm into right now
+
+Lately, I've been fascinated by **alternative processor architectures**, in particular **thermodynamic** and **quantum computing**. For decades, compilers could assume a deterministic machine that executes one instruction after another. Thermodynamic processors instead let physical noise do the work and natively sample from probability distributions. Quantum processors compute with superposition and interference, and that is roughly where my expertise collapses. When it comes to quantum computers, I'm a total scrub, happily scratching the surface: I can tell a qubit from a regular bit, but my understanding of what's going on underneath is, fittingly, best described as a superposition of "I get it" and "I have no idea". Both kinds of hardware turn the usual questions upside down: what does a program look like, what does a compiler optimise for, and which problems are a good fit in the first place? I'm exploring these questions here on the blog, starting with a [primer on thermodynamic processors](posts/2026-10-09-thermodynamic-processors-primer.qmd).
+
+Closer to conventional hardware, I enjoy hacking on RISC-V and other low-level technologies in my free time.
+
+## Work
+
+I work as a Software Engineer at **Lufthansa Technik AG**, where I apply my experience in distributed systems to build robust, critical solutions for the aviation industry.
+
+Before that, I worked on [NebulaStream](https://github.com/nebulastream), where I contributed to the query compiler Nautilus, and was a Research Assistant in the [Database Systems and Information Management](https://www.tu.berlin/en/dima) group at [TU Berlin](https://www.tu.berlin/), under the excellent guidance of [Philipp M. Grulich](https://grulich.me/) and [Prof. Dr. Volker Markl](https://www.tu.berlin/dima/ueber-uns/prof-dr-volker-markl).
+
+Earlier, I worked at the [German Research Center for Artificial Intelligence](https://www.dfki.de/en/web), the [German–Turkish Advanced Research Centre for ICT](https://gt-arc.com/) and the [Distributed Artificial Intelligence Laboratory](https://dai-labor.de/en/home/), under the guidance of [Prof. Dr. Sahin Albayrak](https://dai-labor.de/team/sahin-albayrak/).
+
+## Education
+
+I started with a Bachelor's degree in Economics at Universität Mannheim, where my thesis explored the relationship between stock reports and uncertainty. Along the way I discovered C++ and programming, which led me to a second Bachelor's in Computer Science at TU Berlin, specialising in distributed systems and cloud/network technologies. I then earned a Master's in Computer Science at TU Berlin, focusing on compiler technologies, stream processing and scalable data processing on modern hardware.
+
+## Get in touch
+
+Besides my day job, I freelance as a React Native developer. I'm always happy to talk about compilers, WebAssembly or unusual hardware, so feel free to reach out via [email](mailto:victorbieszka@gmail.com) or [LinkedIn](https://www.linkedin.com/in/victor-bieszka-a567ba151).
