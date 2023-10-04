@@ -16,7 +16,7 @@
 title: Victor's blog
 email: (...)@gmail.com
 description: >- # this means to ignore newlines until "baseurl:"
-  I'm writing to learn.
+  Compilers, Databases, and Virtualization.
 baseurl: "" # the subpath of your site, e.g. /blog
 url: "https://bievic.github.io/" # the base hostname & protocol for your site, e.g. http://example.com
 twitter_username: 
