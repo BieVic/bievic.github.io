@@ -1,41 +1,76 @@
-# Welcome to Jekyll!
-#
-# This config file is meant for settings that affect your whole blog, values
-# which you are expected to set up once and rarely edit after that. If you find
-# yourself editing this file very often, consider using Jekyll's data files
-# feature for the data you need to update frequently.
-#
-# For technical reasons, this file is *NOT* reloaded automatically when you use
-# 'bundle exec jekyll serve'. If you change this file, please restart the server process.
+# Configs
 
-# Site settings
-# These are used to personalize your new site. If you look in the HTML files,
-# you will see them accessed via {{ site.title }}, {{ site.email }}, and so on.
-# You can create any custom variable you would like, and they will be accessible
-# in the templates via {{ site.myvariable }}.
-title: Victor's blog
-email: (...)@gmail.com
-description: >- # this means to ignore newlines until "baseurl:"
-  Compilers, Database Technologies, Virtualization, and programming languages in general.
-baseurl: "" # the subpath of your site, e.g. /blog
-url: "https://bievic.github.io/" # the base hostname & protocol for your site, e.g. http://example.com
-twitter_username: 
-github_username:  BieVic
+title: "loop-unroller"
+name: "loop-unroller"
+email: victorbieszka@gmail.com
+repository: "bievic/bievic.github.io"
+
+include:
+  - _pages
+  - assets
+  - index.html
+exclude:
+  - TODO.md
+  - README.md
+  - "*.org"
+  - "*ltximg*"
+
+plugins:
+  - jekyll-feed
+  - jekyll-remote-theme
+  - jekyll-include-cache
 
 # Build settings
 markdown: kramdown
-theme: minima
-plugins:
-  - jekyll-feed
+remote_theme: "mmistakes/minimal-mistakes"
+minimal_mistakes_skin: "dark"
 
-# Exclude from processing.
-# The following items will not be processed, by default. Create a custom list
-# to override the default setting.
-# exclude:
-#   - Gemfile
-#   - Gemfile.lock
-#   - node_modules
-#   - vendor/bundle/
-#   - vendor/cache/
-#   - vendor/gems/
-#   - vendor/ruby/
+# settings for author profile
+author:
+  name   : "Victor Bieszka"
+  avatar : "/assets/images/headshot.jpg"
+  bio    : "I love learning new things - especially about compilers, data management systems and WebAssembly."
+  location: "Hamburg, Germany"
+  github : bievic
+  linkedin: victor-bieszka-a567ba151
+  email  : victorbieszka@gmail.com
+
+
+# pagination for blog page
+paginate: 5 # number of posts to show
+paginate_path: /page:num/
+
+# default YAML front matter
+defaults:
+  # all
+  - scope:
+      path: ""
+    values:
+      layout: single
+      mathjax: true
+      author_profile: true
+      class: wide
+      title: " "
+      title_separator: "|"
+  # posts
+  - scope:
+      type: posts
+    values:
+      toc: true
+      toc_label: "Contents"
+      read_time: false
+      comments: true
+  # portfolio
+  - scope:
+      path: ""
+      type: portfolio
+    values:
+      author_profile: false
+      excerpt: ""
+      sidebar:
+        nav: "portfolio"
+
+# collections
+collections:
+  portfolio:
+    output: true
