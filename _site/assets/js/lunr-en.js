@@ -20,10 +20,19 @@ var idx = lunr(function () {
     
       this.add({
           title: " ",
-          excerpt: "Portfolio Here you’ll find summaries of the major projects I’ve done over the years, which are representative of my skills...",
+          excerpt: "WIP\n\nPaper\n\n",
           categories: [],
           tags: [],
           id: 1
+      })
+      
+    
+      this.add({
+          title: " ",
+          excerpt: "Portfolio Here you’ll find summaries of the major projects I’ve done over the years, which are representative of my skills...",
+          categories: [],
+          tags: [],
+          id: 2
       })
       
     
@@ -35,7 +44,7 @@ var idx = lunr(function () {
           excerpt: "Welcome First of all, thank you for visiting my website. As you might have seen, it’s quite barren here and...",
           categories: ["posts"],
           tags: [],
-          id: 2
+          id: 3
       })
       
     
@@ -54,6 +63,17 @@ var store = [
         "title": " ",
         "url": "http://localhost:4000/portfolio/coming-soon/",
         "excerpt": "Coming Soon!\n\n",
+        "teaser":
+          
+            null
+          
+      },
+    
+      
+      {
+        "title": " ",
+        "url": "http://localhost:4000/portfolio/fog_nodes/",
+        "excerpt": "WIP\n\nPaper\n\n",
         "teaser":
           
             null

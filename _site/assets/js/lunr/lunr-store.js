@@ -6,6 +6,12 @@ var store = [{
         "teaser": null
       },{
         "title": " ",
+        "excerpt":"WIP   Paper   ","categories": [],
+        "tags": [],
+        "url": "/portfolio/fog_nodes/",
+        "teaser": null
+      },{
+        "title": " ",
         "excerpt":"Portfolio Here you’ll find summaries of the major projects I’ve done over the years, which are representative of my skills and interests. These projects span everything from mathematical physics to machine learning, from finance to advertising, from the theoretical to the practical. The discussion here is generally non-technical; for the...","categories": [],
         "tags": [],
         "url": "/portfolio/index.html",
