@@ -1,7 +1,8 @@
 ---
 title: " "
 header:
-  overlay_image: /assets/images/georgia.jpg
+  overlay_image: /assets/images/hamburg.jpg
+  overlay_filter: 0.2
 permalink: /about/
 ---
 
