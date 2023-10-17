@@ -12,9 +12,15 @@ var store = [{
         "teaser": null
       },{
         "title": " ",
-        "excerpt":"Portfolio Here you’ll find summaries of the major projects I’ve done over the years, which are representative of my skills and interests. These projects span everything from mathematical physics to machine learning, from finance to advertising, from the theoretical to the practical. The discussion here is generally non-technical; for the...","categories": [],
+        "excerpt":"Portfolio Here you’ll find summaries of the major projects I’ve done over the years, which are representative of my skills and interests. These projects span various areas such as security, data management systems and compiler design. Lately I have been focusing on WebAssembly and moving closer to bare metal programming....","categories": [],
         "tags": [],
         "url": "/portfolio/index.html",
+        "teaser": null
+      },{
+        "title": "Embedding Wasmtime in C++",
+        "excerpt":"Embedding Wasmtime in C++   ","categories": ["posts"],
+        "tags": [],
+        "url": "/posts/2023/07/04/wasmtime-cpp.html",
         "teaser": null
       },{
         "title": "Work-In-Progress",
