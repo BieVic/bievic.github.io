@@ -41,7 +41,7 @@ var idx = lunr(function () {
     
       this.add({
           title: "Embedding Wasmtime in C++",
-          excerpt: "Embedding Wasmtime in C++\n\n",
+          excerpt: "I think by now we all can agree, that WebAssembly is an exciting technology WebAssembly and C++ If you’re interested...",
           categories: ["posts"],
           tags: [],
           id: 3
@@ -108,7 +108,7 @@ var store = [
       {
         "title": "Embedding Wasmtime in C++",
         "url": "http://localhost:4000/posts/2023/07/04/wasmtime-cpp.html",
-        "excerpt": "Embedding Wasmtime in C++\n\n",
+        "excerpt": "I think by now we all can agree, that WebAssembly is an exciting technology WebAssembly and C++ If you’re interested...",
         "teaser":
           
             null

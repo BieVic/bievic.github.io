@@ -286,13 +286,25 @@
           <aside class="sidebar__right ">
             <nav class="toc">
               <header><h4 class="nav__title"><i class="fas fa-file-alt"></i> Contents</h4></header>
-              <ul class="toc__menu"><li><a href="#embedding-wasmtime-in-c">Embedding Wasmtime in C++</a></li></ul>
+              <ul class="toc__menu"><li><a href="#webassembly-and-c">WebAssembly and C++</a></li></ul>
 
             </nav>
           </aside>
         
-        <h1 id="embedding-wasmtime-in-c">Embedding Wasmtime in C++</h1>
+        <p>I think by now we all can agree, that WebAssembly is an exciting technology</p>
 
+<h1 id="webassembly-and-c">WebAssembly and C++</h1>
+
+<p>If you’re interested in executing WebAssembly in your C++ project,
+you have plenty of sound options to do do. Most notably, <a href="https://wasmer.io/">Wasmer</a>, 
+<a href="https://github.com/bytecodealliance/wasm-micro-runtime">WAMR</a>, <a href="https://wasmtime.dev/">Wasmtime</a>, just to name a few.
+Now, let’s have a look at Wasmtime, my go-to standalone WebAssembly engine. You might ask: Why Wasmtime?</p>
+
+<p>Well, I had a great experience using it for my Master’s thesis, it’s easy to use and achieves excellent performance.
+The reason why I’m writing this post is the unfortunate lack of documentation on how to embed Wasmtime in C++.
+So, without further ado, let us have a look how you can do it!</p>
+
+<p>#</p>
 
         
       </section>

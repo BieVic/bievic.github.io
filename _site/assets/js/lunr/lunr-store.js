@@ -18,7 +18,7 @@ var store = [{
         "teaser": null
       },{
         "title": "Embedding Wasmtime in C++",
-        "excerpt":"Embedding Wasmtime in C++   ","categories": ["posts"],
+        "excerpt":"I think by now we all can agree, that WebAssembly is an exciting technology WebAssembly and C++ If you’re interested in executing WebAssembly in your C++ project, you have plenty of sound options to do do. Most notably, Wasmer, WAMR, Wasmtime, just to name a few. Now, let’s have a...","categories": ["posts"],
         "tags": [],
         "url": "/posts/2023/07/04/wasmtime-cpp.html",
         "teaser": null
