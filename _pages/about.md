@@ -8,9 +8,11 @@ permalink: /about/
 
 # About Me
 
+I'm passionate about programming languages such as C++ and Rust. My focus at the moment is WebAssembly, and I'm contributing to
+the amazing WebAssembly runtime [Wasmtime](https://wasmtime.dev/). In my free time, I love to hack on RISC-V and other
+low-level stuff.
 
-
-I am currently working on [NebulaStream](https://github.com/nebulastream), where I contribute to the novel query compiler Nautilus 
+Currently, I'm working on [NebulaStream](https://github.com/nebulastream), where I contribute to the novel query compiler Nautilus 
 Additionally, I work as a Research Assistant at the [Database Systems and Information Management](https://www.tu.berlin/en/dima) 
 research group at [TU Berlin](https://www.tu.berlin/), under the excellent guidance of [Philipp M. Grulich](https://grulich.me//) 
 and [Prof. Dr. rer. nat. Volker Markl](https://www.tu.berlin/dima/ueber-uns/prof-dr-volker-markl).
