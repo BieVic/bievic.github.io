@@ -1,10 +1,11 @@
 <!doctype html>
 <!--
-  Minimal Mistakes Jekyll Theme 4.24.0 by Michael Rose
-  Copyright 2013-2020 Michael Rose - mademistakes.com | @mmistakes
+  Minimal Mistakes Jekyll Theme 4.27.3 by Michael Rose
+  Copyright 2013-2025 Michael Rose - mademistakes.com | @mmistakes
   Free for personal and commercial use under the MIT license
   https://github.com/mmistakes/minimal-mistakes/blob/master/LICENSE
 -->
+
 <html lang="en" class="no-js">
   <head>
     <meta charset="utf-8">
@@ -46,16 +47,7 @@
 
 
 
-<script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    
-      "@type": "Person",
-      "name": "loop-unroller",
-      "url": "http://localhost:4000/"
-    
-  }
-</script>
+
 
 
 
@@ -68,19 +60,17 @@
 
 
   <link href="/feed.xml" type="application/atom+xml" rel="alternate" title="loop-unroller Feed">
-
-
-<!-- https://t.co/dKP3o1e -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <script>
   document.documentElement.className = document.documentElement.className.replace(/\bno-js\b/g, '') + ' js ';
+  
 </script>
 
 <!-- For all browsers -->
 <link rel="stylesheet" href="/assets/css/main.css">
-<link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@5/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
-<noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@5/css/all.min.css"></noscript>
+<link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@latest/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@latest/css/all.min.css"></noscript>
 
 
 
@@ -92,7 +82,7 @@
 
   </head>
 
-  <body class="layout--single">
+  <body class="layout--single" dir="ltr">
     <nav class="skip-links">
   <ul>
     <li><a href="#site-nav" class="screen-reader-shortcut">Skip to primary navigation</a></li>
@@ -113,13 +103,29 @@
           
         </a>
         <ul class="visible-links"><li class="masthead__menu-item">
-              <a href="/">Home</a>
+              <a
+                href="/"
+                
+                
+              >Home</a>
             </li><li class="masthead__menu-item">
-              <a href="/about/">About</a>
+              <a
+                href="/about/"
+                
+                
+              >About</a>
             </li><li class="masthead__menu-item">
-              <a href="/portfolio/">Portfolio</a>
+              <a
+                href="/portfolio/"
+                
+                
+              >Portfolio</a>
             </li><li class="masthead__menu-item">
-              <a href="/assets/docs/resume.pdf">Resume</a>
+              <a
+                href="/assets/docs/resume.pdf"
+                
+                
+              >Resume</a>
             </li></ul>
         
         <button class="greedy-nav__toggle hidden" type="button">
@@ -262,7 +268,7 @@
 
 
 
-  <article class="page h-entry" itemscope itemtype="https://schema.org/CreativeWork">
+  <article class="page" itemscope itemtype="https://schema.org/CreativeWork">
     <meta itemprop="headline" content="Embedding Wasmtime in C++">
     <meta itemprop="description" content="A little guide on how to embed Wasmtime in your C++ project.">
     <meta itemprop="datePublished" content="2023-07-04T00:00:00+02:00">
@@ -271,8 +277,8 @@
     <div class="page__inner-wrap">
       
         <header>
-          <h1 id="page-title" class="page__title p-name" itemprop="headline">
-            <a href="http://localhost:4000/posts/2023/07/04/wasmtime-cpp.html" class="u-url" itemprop="url">Embedding Wasmtime in C++
+          <h1 id="page-title" class="page__title" itemprop="headline">
+            <a href="http://localhost:4000/posts/2023/07/04/wasmtime-cpp.html" itemprop="url">Embedding Wasmtime in C++
 </a>
           </h1>
           
@@ -281,30 +287,58 @@
         </header>
       
 
-      <section class="page__content e-content" itemprop="text">
+      <section class="page__content" itemprop="text">
         
           <aside class="sidebar__right ">
             <nav class="toc">
               <header><h4 class="nav__title"><i class="fas fa-file-alt"></i> Contents</h4></header>
-              <ul class="toc__menu"><li><a href="#webassembly-and-c">WebAssembly and C++</a></li></ul>
-
+              <ul class="toc__menu"><li><a href="#embedding-webassembly">Embedding WebAssembly</a></li><li><a href="#call-c-from-webassembly">Call C++ from WebAssembly</a></li><li><a href="#externref-for-complex-data">Externref for complex data</a></li></ul>
             </nav>
           </aside>
         
-        <p>I think by now we all can agree, that WebAssembly is an exciting technology</p>
+        <p>This is a little guide on how to execute WebAssembly inside C++, and vice versa. 
+First, we are going to embed <a href="https://wasmtime.dev/">Wasmtime</a> in C++. This will allow us to call WebAssembly within any C++ project.
+Wasmtime is a fantastic standalone runtime for WebAssembly, that comes equipped with it’s own compiler, called Cranelift.
+I might be a bit biased though as I have contributed to Cranelift/Wasmtime. Nevertheless, give it a try and if you have any questions, issue, etc., 
+join us at <a href="https://bytecodealliance.zulipchat.com/">zulip</a>.</p>
 
-<h1 id="webassembly-and-c">WebAssembly and C++</h1>
+<p>Anyway, let’s get back to work. Calling C++ functions from WebAssembly is a little bit more tricky. 
+This will require us to register Host-Functions in Wasmtime. Lastly, if we are interested in passing more complex data 
+to WebAssembly (such as a C++ pointers or classes), we can utilize WebAssembly’s <em>externref</em> type.</p>
 
-<p>If you’re interested in executing WebAssembly in your C++ project,
-you have plenty of sound options to do do. Most notably, <a href="https://wasmer.io/">Wasmer</a>, 
-<a href="https://github.com/bytecodealliance/wasm-micro-runtime">WAMR</a>, <a href="https://wasmtime.dev/">Wasmtime</a>, just to name a few.
-Now, let’s have a look at Wasmtime, my go-to standalone WebAssembly engine. You might ask: Why Wasmtime?</p>
+<h2 id="embedding-webassembly">Embedding WebAssembly</h2>
 
-<p>Well, I had a great experience using it for my Master’s thesis, it’s easy to use and achieves excellent performance.
-The reason why I’m writing this post is the unfortunate lack of documentation on how to embed Wasmtime in C++.
-So, without further ado, let us have a look how you can do it!</p>
+<p>Before we can use Wasmtime in our C++ project, we need to include the <a href="https://github.com/bytecodealliance/wasmtime-cpp">wasmtime.hh</a> header file. 
+Now, let’s suppose we have a simple WebAssembly module called <em>wasm.wat</em> as following:</p>
 
-<p>#</p>
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="o">(</span>module
+  <span class="o">(</span>func <span class="o">(</span><span class="nb">export</span> <span class="s2">"execute"</span><span class="o">)</span> <span class="o">()</span>
+  <span class="o">)</span>
+<span class="o">)</span>
+</code></pre></div></div>
+
+<p>This module contains one empty exported function that is correct, callable and yet does nothing. We now want to call this function
+from within our C++ project.</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cp">#include &lt;wasmtime.hh&gt;
+</span>
+<span class="k">using</span> <span class="k">namespace</span> <span class="n">wasmtime</span><span class="p">;</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">Engine</span> <span class="n">engine</span><span class="p">;</span>
+    <span class="n">Linker</span> <span class="n">linker</span><span class="p">(</span><span class="n">engine</span><span class="p">);</span>
+    <span class="n">Store</span> <span class="n">store</span><span class="p">(</span><span class="n">engine</span><span class="p">);</span>
+
+    <span class="k">auto</span> <span class="n">module</span> <span class="o">=</span> <span class="n">Module</span><span class="o">::</span><span class="n">compile</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">readFile</span><span class="p">(</span><span class="s">"wasm.wat"</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+    <span class="k">auto</span> <span class="n">instance</span> <span class="o">=</span> <span class="n">Instance</span><span class="o">::</span><span class="n">create</span><span class="p">(</span><span class="n">store</span><span class="p">,</span> <span class="n">module</span><span class="p">,</span> <span class="p">{}).</span><span class="n">unwrap</span><span class="p">();</span>
+    <span class="k">auto</span> <span class="n">execute</span> <span class="o">=</span> <span class="n">std</span><span class="o">::</span><span class="n">get</span><span class="o">&lt;</span><span class="n">Func</span><span class="o">&gt;</span><span class="p">(</span><span class="o">*</span><span class="n">instance</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">store</span><span class="p">,</span> <span class="s">"execute"</span><span class="p">));</span>
+    <span class="n">execute</span><span class="p">.</span><span class="n">call</span><span class="p">(</span><span class="n">store</span><span class="p">,</span> <span class="p">{}).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h2 id="call-c-from-webassembly">Call C++ from WebAssembly</h2>
+
+<h2 id="externref-for-complex-data">Externref for complex data</h2>
 
         
       </section>
@@ -328,10 +362,10 @@ So, without further ado, let us have a look how you can do it!</p>
       <a href="#" class="pagination--pager disabled">Previous</a>
     
     
-      <a href="/posts/2023/10/01/coming-soon.html" class="pagination--pager" title="Work-In-Progress
-">Next</a>
+      <a href="/posts/2023/10/01/coming-soon.html" class="pagination--pager" title="Work-In-Progress">Next</a>
     
   </nav>
+
 
     </div>
 
@@ -342,6 +376,7 @@ So, without further ado, let us have a look how you can do it!</p>
   
 </div>
 
+      
     </div>
 
     
@@ -351,7 +386,9 @@ So, without further ado, let us have a look how you can do it!</p>
         <!-- start custom footer snippets -->
 
 <!-- end custom footer snippets -->
-        <div class="page__footer-follow">
+        
+
+<div class="page__footer-follow">
   <ul class="social-icons">
     
 
@@ -363,7 +400,8 @@ So, without further ado, let us have a look how you can do it!</p>
   </ul>
 </div>
 
-<div class="page__footer-copyright">&copy; 2023 loop-unroller. Powered by <a href="https://jekyllrb.com" rel="nofollow">Jekyll</a> &amp; <a href="https://mademistakes.com/work/minimal-mistakes-jekyll-theme/" rel="nofollow">Minimal Mistakes</a>.</div>
+
+<div class="page__footer-copyright">&copy; 2025 <a href="http://localhost:4000">loop-unroller</a>. Powered by <a href="https://jekyllrb.com" rel="nofollow">Jekyll</a> &amp; <a href="https://mademistakes.com/work/jekyll-themes/minimal-mistakes/" rel="nofollow">Minimal Mistakes</a>.</div>
 
       </footer>
     </div>
@@ -384,7 +422,6 @@ So, without further ado, let us have a look how you can do it!</p>
 
 
 <script src="https://use.fontawesome.com/releases/v5.0.6/js/all.js"></script>
-
 
 
 

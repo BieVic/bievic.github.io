@@ -18,7 +18,7 @@ var store = [{
         "teaser": null
       },{
         "title": "Embedding Wasmtime in C++",
-        "excerpt":"I think by now we all can agree, that WebAssembly is an exciting technology WebAssembly and C++ If you’re interested in executing WebAssembly in your C++ project, you have plenty of sound options to do do. Most notably, Wasmer, WAMR, Wasmtime, just to name a few. Now, let’s have a...","categories": ["posts"],
+        "excerpt":"This is a little guide on how to execute WebAssembly inside C++, and vice versa. First, we are going to embed Wasmtime in C++. This will allow us to call WebAssembly within any C++ project. Wasmtime is a fantastic standalone runtime for WebAssembly, that comes equipped with it’s own compiler,...","categories": ["posts"],
         "tags": [],
         "url": "/posts/2023/07/04/wasmtime-cpp.html",
         "teaser": null

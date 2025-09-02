@@ -1,19 +1,48 @@
-<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="3.9.0">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2023-10-18T23:42:22+02:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">loop-unroller</title><author><name>Victor Bieszka</name><email>victorbieszka@gmail.com</email></author><entry><title type="html">Work-In-Progress</title><link href="http://localhost:4000/posts/2023/10/01/coming-soon.html" rel="alternate" type="text/html" title="Work-In-Progress" /><published>2023-10-01T00:00:00+02:00</published><updated>2023-10-01T00:00:00+02:00</updated><id>http://localhost:4000/posts/2023/10/01/coming-soon</id><content type="html" xml:base="http://localhost:4000/posts/2023/10/01/coming-soon.html">&lt;h2 id=&quot;welcome&quot;&gt;Welcome&lt;/h2&gt;
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="3.9.0">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2025-09-02T16:42:42+02:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">loop-unroller</title><author><name>Victor Bieszka</name><email>victorbieszka@gmail.com</email></author><entry><title type="html">Work-In-Progress</title><link href="http://localhost:4000/posts/2023/10/01/coming-soon.html" rel="alternate" type="text/html" title="Work-In-Progress" /><published>2023-10-01T00:00:00+02:00</published><updated>2023-10-01T00:00:00+02:00</updated><id>http://localhost:4000/posts/2023/10/01/coming-soon</id><content type="html" xml:base="http://localhost:4000/posts/2023/10/01/coming-soon.html">&lt;h2 id=&quot;welcome&quot;&gt;Welcome&lt;/h2&gt;
 
 &lt;p&gt;First of all, thank you for visiting my website. As you might have seen, it’s quite barren here and I’d like to apologize for that. 
 As I’m currently compiling all my projects, research, tidbits, etc., this website is still in a work-in-progress state.
 Stay tuned for more :)
-&lt;!-------------------------------- FOOTER ----------------------------&gt;&lt;/p&gt;</content><author><name>Victor Bieszka</name><email>victorbieszka@gmail.com</email></author><category term="posts" /><summary type="html">Welcome to my website! And sorry for the work-in-progress.</summary></entry><entry><title type="html">Embedding Wasmtime in C++</title><link href="http://localhost:4000/posts/2023/07/04/wasmtime-cpp.html" rel="alternate" type="text/html" title="Embedding Wasmtime in C++" /><published>2023-07-04T00:00:00+02:00</published><updated>2023-07-04T00:00:00+02:00</updated><id>http://localhost:4000/posts/2023/07/04/wasmtime-cpp</id><content type="html" xml:base="http://localhost:4000/posts/2023/07/04/wasmtime-cpp.html">&lt;p&gt;I think by now we all can agree, that WebAssembly is an exciting technology&lt;/p&gt;
+&lt;!-------------------------------- FOOTER ----------------------------&gt;&lt;/p&gt;</content><author><name>Victor Bieszka</name><email>victorbieszka@gmail.com</email></author><category term="posts" /><summary type="html">Welcome to my website! And sorry for the work-in-progress.</summary></entry><entry><title type="html">Embedding Wasmtime in C++</title><link href="http://localhost:4000/posts/2023/07/04/wasmtime-cpp.html" rel="alternate" type="text/html" title="Embedding Wasmtime in C++" /><published>2023-07-04T00:00:00+02:00</published><updated>2023-07-04T00:00:00+02:00</updated><id>http://localhost:4000/posts/2023/07/04/wasmtime-cpp</id><content type="html" xml:base="http://localhost:4000/posts/2023/07/04/wasmtime-cpp.html">&lt;p&gt;This is a little guide on how to execute WebAssembly inside C++, and vice versa. 
+First, we are going to embed &lt;a href=&quot;https://wasmtime.dev/&quot;&gt;Wasmtime&lt;/a&gt; in C++. This will allow us to call WebAssembly within any C++ project.
+Wasmtime is a fantastic standalone runtime for WebAssembly, that comes equipped with it’s own compiler, called Cranelift.
+I might be a bit biased though as I have contributed to Cranelift/Wasmtime. Nevertheless, give it a try and if you have any questions, issue, etc., 
+join us at &lt;a href=&quot;https://bytecodealliance.zulipchat.com/&quot;&gt;zulip&lt;/a&gt;.&lt;/p&gt;
 
-&lt;h1 id=&quot;webassembly-and-c&quot;&gt;WebAssembly and C++&lt;/h1&gt;
+&lt;p&gt;Anyway, let’s get back to work. Calling C++ functions from WebAssembly is a little bit more tricky. 
+This will require us to register Host-Functions in Wasmtime. Lastly, if we are interested in passing more complex data 
+to WebAssembly (such as a C++ pointers or classes), we can utilize WebAssembly’s &lt;em&gt;externref&lt;/em&gt; type.&lt;/p&gt;
 
-&lt;p&gt;If you’re interested in executing WebAssembly in your C++ project,
-you have plenty of sound options to do do. Most notably, &lt;a href=&quot;https://wasmer.io/&quot;&gt;Wasmer&lt;/a&gt;, 
-&lt;a href=&quot;https://github.com/bytecodealliance/wasm-micro-runtime&quot;&gt;WAMR&lt;/a&gt;, &lt;a href=&quot;https://wasmtime.dev/&quot;&gt;Wasmtime&lt;/a&gt;, just to name a few.
-Now, let’s have a look at Wasmtime, my go-to standalone WebAssembly engine. You might ask: Why Wasmtime?&lt;/p&gt;
+&lt;h2 id=&quot;embedding-webassembly&quot;&gt;Embedding WebAssembly&lt;/h2&gt;
 
-&lt;p&gt;Well, I had a great experience using it for my Master’s thesis, it’s easy to use and achieves excellent performance.
-The reason why I’m writing this post is the unfortunate lack of documentation on how to embed Wasmtime in C++.
-So, without further ado, let us have a look how you can do it!&lt;/p&gt;
+&lt;p&gt;Before we can use Wasmtime in our C++ project, we need to include the &lt;a href=&quot;https://github.com/bytecodealliance/wasmtime-cpp&quot;&gt;wasmtime.hh&lt;/a&gt; header file. 
+Now, let’s suppose we have a simple WebAssembly module called &lt;em&gt;wasm.wat&lt;/em&gt; as following:&lt;/p&gt;
 
-&lt;p&gt;#&lt;/p&gt;</content><author><name>Victor Bieszka</name><email>victorbieszka@gmail.com</email></author><category term="posts" /><summary type="html">A little guide on how to embed Wasmtime in your C++ project.</summary></entry></feed>
+&lt;div class=&quot;language-sh highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;module
+  &lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;func &lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;export&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;execute&quot;&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;()&lt;/span&gt;
+  &lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;This module contains one empty exported function that is correct, callable and yet does nothing. We now want to call this function
+from within our C++ project.&lt;/p&gt;
+
+&lt;div class=&quot;language-cpp highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;cp&quot;&gt;#include &amp;lt;wasmtime.hh&amp;gt;
+&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;using&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;namespace&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;wasmtime&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+
+&lt;span class=&quot;kt&quot;&gt;int&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;Engine&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;engine&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;Linker&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;linker&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;engine&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;Store&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;store&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;engine&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;auto&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;module&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;Module&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;compile&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;engine&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;readFile&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;wasm.wat&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)).&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;unwrap&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;auto&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;instance&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;Instance&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;create&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;store&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;module&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{}).&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;unwrap&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;auto&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;std&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;&amp;lt;&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Func&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;&amp;gt;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;instance&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;get&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;store&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&quot;execute&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;));&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;execute&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;call&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;store&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{}).&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;unwrap&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;call-c-from-webassembly&quot;&gt;Call C++ from WebAssembly&lt;/h2&gt;
+
+&lt;h2 id=&quot;externref-for-complex-data&quot;&gt;Externref for complex data&lt;/h2&gt;</content><author><name>Victor Bieszka</name><email>victorbieszka@gmail.com</email></author><category term="posts" /><summary type="html">A little guide on how to embed Wasmtime in your C++ project.</summary></entry></feed>
