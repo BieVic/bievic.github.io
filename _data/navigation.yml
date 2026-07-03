@@ -6,8 +6,8 @@ main:
     url: /about/
   - title: "Portfolio"
     url: /portfolio/
-  - title: "Resume"
-    url: /assets/docs/resume.pdf
+  #- title: "Resume"
+  #  url: /assets/docs/resume.pdf
   # - title: "Blog"
   #   url: /blog/
 
